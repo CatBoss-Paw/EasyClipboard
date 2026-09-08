@@ -1,0 +1,61 @@
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.spec.bak
+
+# ========== PyInstaller ==========
+# 打包中间产物（产物本身通过 Release 分发，不入仓库）
+build/
+dist/
+
+# ========== 运行时数据（用户本地产生，不入仓库） ==========
+_TempShelf/
+_History/
+_Journal/
+_Pinned/
+_Prompts/
+shelf_settings.json
+
+# ========== 日志 ==========
+*.log
+app.log
+app2.log
+app_err.log
+shelf_app.log
+watchdog.log
+
+# ========== IDE / 编辑器 ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========== 系统文件 ==========
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# ========== 项目辅助（非核心，不入仓库） ==========
+.github/
+.lingxi/
+.mimosa/
+.rundata/
+.video_agent/
+output/
+references/
+拖出测试/
+2026-*/
+交接提示词.md
+交接文档.md
+使用说明.md
+check_launch.py
+start_packaged.bat
+start_shelf.bat
