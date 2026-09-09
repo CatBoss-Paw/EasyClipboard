@@ -75,14 +75,12 @@ DRAFT_NAME = "draft.md"
 MANIFEST_NAME = ".manifest.json"
 HOTKEY = "f9"
 
-# ------------------------------------------------------------------ 双进程名与锁名
-# 【产品铁律】开机自启必须指向【看守进程】，而不是界面进程。
-# 界面进程完全不监听剪贴板（架构定稿，见交接文档 §1），剪贴板捕获、
-# 每日日志、F9/F10 全局热键全部由看守持有。若自启指向界面，开机后
-# 产品完全不工作：无任何捕获、F9 也无反应。
-WD_EXE_NAME = "轻松剪贴板-看守.exe"      # 看守打包后的 exe 名
-WD_SCRIPT_NAME = "watchdog.pyw"          # 看守脚本名（开发态）
-WD_MUTEX_NAME = "EasyClipboardWatchdog"  # 与 watchdog.pyw 中 CreateMutexW 一致，用于探活
+# ------------------------------------------------------------------ 内置看护架构
+# 【一体化单进程架构】软件与看护后台完全融为一体（All-in-One）。
+# 剪贴板监听、图片与文件捕获、每日工作日志写入作为内部守护线程常驻。
+# 彻底废除外部独立看守进程与黑框终端，开机自启直接常驻托盘，零黑框、零多开。
+from clipboard_watcher import ClipboardWatcher
+
 HELP_TEXT = """轻松剪贴板 (EasyClipboard) · 完整功能与技巧指南
 
 一、核心架构：双轨制高效中转
@@ -2329,19 +2327,20 @@ class Shelf(QWidget):
         self._register_pause_hotkey()
         self._register_hotkey()
         self._paint_pin_state()
-        # 看守守护：若看守没在跑（用户手动只开了界面 / 看守意外退出），
-        # 这里把它拉起来，否则没有剪贴板捕获也没有 F9 热键。
-        # 【重要】ensure_watchdog() 不在这里调，而是在 main() 里调。
-        # 原因：沙箱测试会直接构造 Shelf()，而看守子进程是用它自己的
-        # __file__ 解析路径的（指向真实数据目录），测试对 shelf_app 模块常量的
-        # 沙箱覆写对它完全无效 → 会在用户真实数据上跑一个常驻捕获进程。
-        # 这是本次实测真实发生的事故（manifest 被写入测试字符串）。
-
-        # 界面进程不监听剪贴板（捕获由看守进程负责，彻底规避剪贴板原生崩溃类）。
-        # 界面通过轮询 manifest 文件变化来刷新（见 _poll_backend）。
+        # 【核心内置看护】初始化并启动内置剪贴板后台看护守护线程
+        self.watcher = ClipboardWatcher(
+            shelf_dir=SHELF_DIR,
+            history_dir=HISTORY_DIR,
+            min_text_len=int(self.settings.get("min_text_len", 2)),
+            parent=self
+        )
+        self.watcher.entry_captured.connect(self._on_item_captured)
+        self.watcher.pause_state_changed.connect(self._on_watcher_pause_changed)
+        self.watcher.start()
 
         self._commit()
         self._place_top_right()
+
 
         # 轮询：manifest 变化 → 刷新；.show_sig → F9 呼出/隐藏；.paused → 状态同步
         self._manifest_mtime = 0
@@ -2376,6 +2375,23 @@ class Shelf(QWidget):
         # 全局空格键极速预览快捷键（无死角响应）
         self._space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self._space_shortcut.activated.connect(self._trigger_space_preview)
+
+    def _on_item_captured(self, entry: dict):
+        """内置看护器捕获到新条目时的秒级直连响应"""
+        self._idle_ticks = 0
+        self._load_manifest()
+        self._sync_ui()
+
+    def _on_watcher_pause_changed(self, paused: bool):
+        """内置看护器暂停状态同步"""
+        self._paused = paused
+        if hasattr(self, "pause_act") and self.pause_act:
+            self.pause_act.setText("▶ 恢复捕获 (F10)" if paused else "⏸ 暂停捕获 (F10)")
+        if hasattr(self, "count_lab") and self.count_lab:
+            if paused:
+                self.count_lab.setText("⏸ 已暂停捕获")
+            else:
+                self._update_counter()
 
     def _poll_backend(self):
         try:
@@ -3462,15 +3478,22 @@ class Shelf(QWidget):
 
     def toggle_pause(self):
         """暂停/恢复捕获：复制密码等敏感内容前用；重启后自动恢复捕获"""
-        self._paused = not getattr(self, "_paused", False)
+        if hasattr(self, "watcher") and self.watcher:
+            self._paused = self.watcher.toggle_pause()
+        else:
+            self._paused = not getattr(self, "_paused", False)
         if self._paused:
-            self.pause_act.setText("▶ 恢复捕获 (F10)")
-            self.count_lab.setText("⏸ 已暂停捕获")
+            if hasattr(self, "pause_act"):
+                self.pause_act.setText("▶ 恢复捕获 (F10)")
+            if hasattr(self, "count_lab"):
+                self.count_lab.setText("⏸ 已暂停捕获")
             self._toast("已暂停捕获——期间的复制不会进入暂存与日志")
         else:
-            self.pause_act.setText("⏸ 暂停捕获 (F10)")
+            if hasattr(self, "pause_act"):
+                self.pause_act.setText("⏸ 暂停捕获 (F10)")
             self._update_counter()
             self._toast("已恢复捕获")
+
 
     def _register_pause_hotkey(self):
         # 与 F9 相同的钩子线程标志 + GUI 轮询消费模式
@@ -3644,10 +3667,22 @@ class Shelf(QWidget):
             global HISTORY_DIR
             HISTORY_DIR = Path(value)
             HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+            if hasattr(self, "watcher") and self.watcher:
+                self.watcher.update_config(history_dir=HISTORY_DIR)
+        elif key == "shelf_dir":
+            global SHELF_DIR, SHELF_REAL
+            SHELF_DIR = Path(value)
+            SHELF_REAL = os.path.realpath(SHELF_DIR)
+            SHELF_DIR.mkdir(parents=True, exist_ok=True)
+            if hasattr(self, "watcher") and self.watcher:
+                self.watcher.update_config(shelf_dir=SHELF_DIR)
         elif key == "pinned_dir":
             global PINNED_DIR
             PINNED_DIR = Path(value)
             PINNED_DIR.mkdir(parents=True, exist_ok=True)
+        elif key == "min_text_len":
+            if hasattr(self, "watcher") and self.watcher:
+                self.watcher.update_config(min_text_len=int(value))
 
     # ------------------------------------------------------------ 开机自启
     AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -3655,87 +3690,30 @@ class Shelf(QWidget):
 
     @staticmethod
     def _autostart_command() -> str:
-        """开机自启命令：必须指向【看守进程】。
-
-        为什么不是界面自己：界面进程完全不监听剪贴板（架构定稿），
-        捕获与 F9/F10 热键全在看守。自启指向界面的话，开机后产品不工作。
-
-        四种组合（frozen × 看守形态），逐一处理：
-        - 打包态：同目录下找看守 exe
-        - 开发态：用 pythonw.exe 跑 watchdog.pyw（pythonw 无控制台窗口，
-          适合常驻；用 python.exe 会闪一个黑框）
+        """开机自启命令：直接指向主程序本体（带 --tray 参数静默启动常驻系统托盘）。
+        【彻底消灭黑框】：
+        - 打包态：直接是无控制台的「轻松剪贴板.exe --tray」，100% 纯净无窗口；
+        - 开发态：使用 pythonw.exe 跑 shelf_app.py，严禁调用 python.exe。
         """
         if getattr(sys, "frozen", False):
-            wd = APP_DIR / "_internal" / WD_EXE_NAME
-            if not wd.exists():
-                wd = APP_DIR / WD_EXE_NAME
-            return f'"{wd}"'
+            return f'"{sys.executable}" --tray'
 
-        wd = APP_DIR / WD_SCRIPT_NAME
-        # 取当前解释器同目录的 pythonw.exe（无控制台，常驻更合适）
         py_dir = Path(sys.executable).resolve().parent
         pythonw = py_dir / "pythonw.exe"
         interp = pythonw if pythonw.exists() else Path(sys.executable).resolve()
-        return f'"{interp}" "{wd}"'
+        script = APP_DIR / "shelf_app.py"
+        return f'"{interp}" "{script}" --tray'
 
-    # ---------------------------------------------------------- 看守进程守护
+    # ---------------------------------------------------------- 一体化看护保障
     def _watchdog_alive(self) -> bool:
-        """探测看守进程是否在跑（靠它自己持有的单实例互斥锁）。"""
-        if sys.platform != "win32":
-            return False
-        try:
-            k32 = ctypes.windll.kernel32
-            k32.SetLastError(0)
-            h = k32.CreateMutexW(None, False, WD_MUTEX_NAME)
-            err = k32.GetLastError()
-            if h:
-                # 【关键】必须立即关句柄：若本进程持有这个互斥锁不放，
-                # 随后拉起的看守会看到 ERROR_ALREADY_EXISTS 而立即退出，
-                # 变成“界面把看守锁死在门外”。互斥锁在最后一个句柄关闭时销毁。
-                k32.CloseHandle(h)
-            return err == 183        # ERROR_ALREADY_EXISTS = 看守已在跑
-        except Exception:
-            return False
+        """一体化架构：看护器作为内部后台守护线程，始终与主程序同生共死"""
+        return hasattr(self, "watcher") and self.watcher is not None and self.watcher._running
 
     def ensure_watchdog(self):
-        """确保看守进程在跑。与看守的 launch_ui() 构成双向保障：
-        看守 F9 拉起界面；界面启动时拉起看守。
-        两侧都有单实例锁（看守用 mutex、界面用 QLocalServer），重复拉起安全。
-        """
-        if sys.platform != "win32":
-            return
-        if self._watchdog_alive():
-            return
-        try:
-            if getattr(sys, "frozen", False):
-                wd = APP_DIR / "_internal" / WD_EXE_NAME
-                if not wd.exists():
-                    wd = APP_DIR / WD_EXE_NAME
-                if not wd.exists():
-                    print(f"[Shelf] 找不到看守 exe：{wd}", file=sys.stderr, flush=True)
-                    return
-                subprocess.Popen([str(wd)], cwd=str(APP_DIR),
-                                 creationflags=0x08000000)   # CREATE_NO_WINDOW
-            else:
-                wd = APP_DIR / WD_SCRIPT_NAME
-                if not wd.exists():
-                    print(f"[Shelf] 找不到看守脚本：{wd}", file=sys.stderr, flush=True)
-                    return
-                # pythonw.exe 无控制台窗口，适合常驻；回退到 python.exe
-                py_dir = Path(sys.executable).resolve().parent
-                pythonw = py_dir / "pythonw.exe"
-                interp = pythonw if pythonw.exists() else Path(sys.executable).resolve()
-                env = dict(os.environ)
-                # 隔离会导致子进程启动即 Fatal 的环境变量
-                # （实测：PYTHONHOME 指向另一套 Python 时，子进程因
-                #   init_import_site / SRE module mismatch 直接崩，看守永远起不来）
-                for k in ("PYTHONHOME", "PYTHONPATH"):
-                    env.pop(k, None)
-                subprocess.Popen([str(interp), str(wd)], cwd=str(APP_DIR),
-                                 creationflags=0x08000000, env=env)
-            print("[Shelf] 看守未在跑，已拉起", file=sys.stderr, flush=True)
-        except OSError as e:
-            print(f"[Shelf] 拉起看守失败: {e}", file=sys.stderr, flush=True)
+        """确保内置看护守护线程正常运行（零子进程，零外部黑框）"""
+        if hasattr(self, "watcher") and self.watcher:
+            self.watcher.start()
+
 
     def autostart_enabled(self) -> bool:
         if sys.platform != "win32":
@@ -4701,15 +4679,23 @@ class Shelf(QWidget):
         trim_working_set()
 
     # ------------------------------------------------------------ 窗口管理
-    def toggle_visible(self):
-        if self.isVisible():
-            self.hide()
-            trim_working_set()
+    def show_and_activate(self):
+        """外部唤醒/双击桌面快捷方式时调用：展开并置顶显示主窗口"""
+        if getattr(self, "_collapsed", False):
+            self._expand_from_block()
         else:
             self._place_top_right()
             self.show()
             self.raise_()
             self.activateWindow()
+
+    def toggle_visible(self):
+        if self.isVisible():
+            self.hide()
+            trim_working_set()
+        else:
+            self.show_and_activate()
+
 
     def toggle_pin(self):
         self._pinned = not self._pinned
@@ -4971,16 +4957,40 @@ class PromptEditDialog(QDialog):
         self.close()
 
 
-def acquire_single_instance() -> bool:
+def acquire_single_instance(on_activate=None) -> bool:
     global _server
     from PyQt6.QtNetwork import QLocalServer, QLocalSocket
     key = "SmartStagingShelf.LocalSocket"
     sock = QLocalSocket()
     sock.connectToServer(key)
-    if sock.waitForConnected(200):
+    if sock.waitForConnected(300):
+        # 说明已有实例在跑，发送唤醒信号并退出当前新实例
+        try:
+            sock.write(b"SHOW\n")
+            sock.flush()
+            sock.waitForBytesWritten(300)
+            sock.disconnectFromServer()
+        except Exception:
+            pass
         return False
+
     QLocalServer.removeServer(key)
     _server = QLocalServer()
+    if on_activate:
+        def _handle_conn():
+            client = _server.nextPendingConnection()
+            if client:
+                def _on_read():
+                    try:
+                        data = client.readAll().data().decode("utf-8", errors="ignore")
+                        if "SHOW" in data:
+                            on_activate()
+                    except Exception:
+                        pass
+                    client.disconnectFromServer()
+                client.readyRead.connect(_on_read)
+        _server.newConnection.connect(_handle_conn)
+
     _server.listen(key)
     return True
 
@@ -5005,8 +5015,6 @@ def _enable_high_dpi():
 
 
 def main():
-    # 必须在 faulthandler.enable() 之前：windowed exe 下 stderr 是 None，
-    # 直接 enable 会抛 RuntimeError，界面根本起不来（BUG-007）。
     _ensure_stdio()
     _enable_high_dpi()
     import faulthandler
@@ -5023,16 +5031,31 @@ def main():
         QPixmapCache.setCacheLimit(2048)
     except Exception:
         pass
-    if not acquire_single_instance():
-        print("[Shelf] 已有实例在运行")
+
+    shelf_ref = []
+
+    def _on_remote_activate():
+        if shelf_ref and shelf_ref[0]:
+            shelf_ref[0].show_and_activate()
+
+    if not acquire_single_instance(_on_remote_activate):
+        print("[Shelf] 已有实例在运行，已唤醒已有窗口")
         return 0
+
     shelf = Shelf()
-    # 看守守护放在 main()（真实运行入口）而不是 Shelf.__init__：
-    # 这样只有用户真启动产品时才拉看守，离屏/沙箱测试构造 Shelf() 不会误拉。
+    shelf_ref.append(shelf)
     shelf.ensure_watchdog()
-    shelf.show()
     shelf.apply_look()
+
+    # 启动模式解析：若包含 --tray 或 --minimized，则开机静默常驻托盘；否则正常弹出主窗口
+    start_in_tray = ("--tray" in sys.argv) or ("--minimized" in sys.argv)
+    if not start_in_tray:
+        shelf.show_and_activate()
+    else:
+        trim_working_set()
+
     sys.exit(app.exec())
+
 
 
 if __name__ == "__main__":

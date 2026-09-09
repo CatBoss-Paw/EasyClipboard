@@ -83,13 +83,13 @@ def _prune_analysis(analysis):
         and "qt6pdf.dll" not in d[0].replace("\\", "/").lower()
     ]
 
-# ------------------------------------------------------------------ 界面进程
+# ------------------------------------------------------------------ 一体化主程序（界面与看护融合）
 ui_analysis = Analysis(
     ["shelf_app.py"],
     pathex=[],
     binaries=[],
     datas=[('assets', 'assets')],
-    hiddenimports=["keyboard", "prompts_store", "icons"],
+    hiddenimports=["keyboard", "prompts_store", "icons", "clipboard_watcher"],
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "matplotlib", "numpy", "pandas", "scipy", "PIL", *QT_EXCLUDES],
@@ -108,54 +108,18 @@ ui_exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,                     # UPX 压缩会显著提高杀软误报率，禁用
-    console=False,                 # 无控制台窗口
+    console=False,                 # 纯净图形应用：100% 绝无任何控制台黑框！
     icon='assets/app.ico',         # 挂载全新官方高清定制图标
 )
 
-# ------------------------------------------------------------------ 看守进程
-# 看守无 Qt 依赖，只需 keyboard + 标准库 + ctypes(Win32)。
-# 与界面共用 _internal，但运行时不会加载 PyQt6，常驻内存保持低位。
-wd_analysis = Analysis(
-    ["watchdog.pyw"],
-    pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=["keyboard"],
-    hookspath=[],
-    runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "scipy", "PIL",
-              *QT_EXCLUDES, "PyQt6"],
-    cipher=block_cipher,
-    noarchive=False,
-)
-_prune_analysis(wd_analysis)
-wd_pyz = PYZ(wd_analysis.pure, wd_analysis.zipped_data, cipher=block_cipher)
-wd_exe = EXE(
-    wd_pyz,
-    wd_analysis.scripts,
-    [],
-    exclude_binaries=True,
-    name=WD_NAME,
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,                 # 常驻进程绝不能弹控制台窗口
-    icon='assets/app.ico',
-)
-
-# ------------------------------------------------------------------ 合并到一个目录
-# 把两个 EXE 交给同一个 COLLECT：依赖会在 _internal 下自动去重合并。
+# ------------------------------------------------------------------ 输出打包产物
 coll = COLLECT(
     ui_exe,
-    wd_exe,
     ui_analysis.binaries,
     ui_analysis.zipfiles,
     ui_analysis.datas,
-    wd_analysis.binaries,
-    wd_analysis.zipfiles,
-    wd_analysis.datas,
     strip=False,
     upx=False,
     name="EasyClipboard",
 )
+
