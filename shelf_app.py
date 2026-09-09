@@ -18,6 +18,7 @@ import gc
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -93,9 +94,9 @@ HELP_TEXT = """轻松剪贴板 (EasyClipboard) · 完整功能与技巧指南
   • 双击操作：双击文字卡 = 立即复制全文；双击文件/图片卡 = 默认程序直接打开。
   • 连击交付：在微信/企微/钉钉聊天窗口中，长按底栏「拖出交付」把手，把所有勾选素材一次性整包拖拽发送。
   • 空格预览（Space）：按键盘空格键，极速快照预览原图大图、文字全文或文件详情，用完即收。
-  • 清空托盘：清空当前工作台临时素材；每日工作日志与快速指令库绝对安全，不受影响。
+  • 清空托盘：清空当前工作台临时素材；每日工作日志与快捷指令库绝对安全，不受影响。
 
-三、⚡ 快速指令（提示词收藏夹与 Markdown 知识库）
+三、⚡ 快捷指令（提示词收藏夹与 Markdown 知识库）
   • 独立 MD 文档：每段提示词都是本地独立的 .md 文件，保存在 _Prompts/ 文件夹下。
   • 资源管理器直通（核心特性）：
     - 右键分类文件夹 → 选择「在资源管理器中打开」，直接打开并管理分类文件夹；
@@ -105,7 +106,7 @@ HELP_TEXT = """轻松剪贴板 (EasyClipboard) · 完整功能与技巧指南
   • 命名约束铁律：收录与改名时严格限制文件名最多 30 个字，自动清洗特殊字符并去除标题排版符，彻底杜绝超长文件名问题。
   • 便捷收纳：
     - 在文字卡片上右键 →「加入快速…」：弹窗上方下拉直接选已有分类，下方可输入新建分类；
-    - 在「今日日志」条目右侧点击「⚡」按钮，一键将历史记录收进快速指令库。
+    - 在「今日日志」条目右侧点击「⚡」按钮，一键将历史记录收进快捷指令库。
   • 就地管理：右键提示词卡片支持「编辑内容」、「改名」、「置顶」、「删除」与「在资源管理器中打开」。
 
 四、永久工作记忆（Daily Clipboard Journal）
@@ -350,7 +351,7 @@ QCheckBox#selBox::indicator:checked {{ background: {accent}; border-color: {acce
     color: {p['title']};
 }}
 
-/* ---- 输入控件（快速指令区/设置/对话框） ---- */
+/* ---- 输入控件（快捷指令区/设置/对话框） ---- */
 QLineEdit, QPlainTextEdit {{
     background: {p['input_bg']}; color: {p['title']};
     border: 1px solid {p['border']}; border-radius: 10px;
@@ -400,7 +401,7 @@ QComboBox QAbstractItemView::item:hover {{
     background: {p['btn_hover']};
 }}
 
-/* ---- 分类列表（快速指令页左侧栏） ---- */
+/* ---- 分类列表（快捷指令页左侧栏） ---- */
 QListWidget {{
     background: transparent; border: none; outline: none; font-size: 12px; color: {p['title']};
 }}
@@ -541,13 +542,19 @@ def unique_dest(name: str) -> str:
     return safe_dest(cand)
 
 
-def safe_pinned_dest(name: str) -> str:
-    """快速访问区（_Pinned）的路径围栏，语义同 safe_dest"""
+def safe_pinned_dest(name: str, subfolder: str = "") -> str:
+    """快速访问区（_Pinned）的路径围栏，支持可选的分类子文件夹"""
     name = os.path.basename(name).strip()
     if not name or name in {".", ".."} or ".." in name:
         name = "unnamed"
     pinned_real = os.path.realpath(PINNED_DIR)
-    dest = os.path.realpath(os.path.join(pinned_real, name))
+    if subfolder:
+        clean_sub = os.path.basename(subfolder.strip())
+        target_dir = os.path.realpath(os.path.join(pinned_real, clean_sub))
+        os.makedirs(target_dir, exist_ok=True)
+    else:
+        target_dir = pinned_real
+    dest = os.path.realpath(os.path.join(target_dir, name))
     try:
         inside = os.path.commonpath([dest, pinned_real]) == pinned_real
     except ValueError:
@@ -557,16 +564,16 @@ def safe_pinned_dest(name: str) -> str:
     return dest
 
 
-def unique_pinned_dest(name: str) -> str:
-    """_Pinned 内同名冲突自动改名"""
+def unique_pinned_dest(name: str, subfolder: str = "") -> str:
+    """_Pinned 内同名冲突自动改名，支持指定分类子文件夹"""
     base, ext = os.path.splitext(os.path.basename(name))
     if not base:
         base = "unnamed"
     cand, i = f"{base}{ext}", 0
-    while os.path.exists(safe_pinned_dest(cand)):
+    while os.path.exists(safe_pinned_dest(cand, subfolder)):
         i += 1
         cand = f"{base}_{i}{ext}"
-    return safe_pinned_dest(cand)
+    return safe_pinned_dest(cand, subfolder)
 
 
 def make_tray_icon() -> QIcon:
@@ -1523,7 +1530,15 @@ class QuickList(QListWidget):
     def dropEvent(self, ev):
         locals_ = [u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()]
         if locals_:
-            self.shelf.quick_ingest_files(locals_)
+            pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+            target_item = self.itemAt(pos)
+            target_dir = None
+            if target_item is not None:
+                ipath = target_item.data(Qt.ItemDataRole.UserRole)
+                if ipath and os.path.isdir(ipath):
+                    target_dir = ipath
+            is_internal = (ev.source() is self)
+            self.shelf.quick_ingest_files(locals_, target_dir=target_dir, is_internal=is_internal)
         ev.acceptProposedAction()
 
     def keyPressEvent(self, ev):
@@ -1731,8 +1746,8 @@ class SettingsDialog(QDialog):
                            self.shelf.settings.get("pinned_dir", str(PINNED_DIR)),
                            self.change_pinned_dir, "pinned_lab")
 
-        # 4. 快速指令（提示词库）—— 补齐配置
-        self._make_dir_row(dv, "⚡ 快速指令（提示词库，支持指定 Obsidian 知识库）",
+        # 4. 快捷指令（提示词库）—— 补齐配置
+        self._make_dir_row(dv, "⚡ 快捷指令（提示词库，支持指定 Obsidian 知识库）",
                            self.shelf.settings.get("prompts_dir", str(APP_DIR / "_Prompts")),
                            self.change_prompts_dir, "prompts_lab")
 
@@ -1797,7 +1812,7 @@ class SettingsDialog(QDialog):
         rv.addWidget(self.custom_row)
         self.custom_row.setVisible(cur_h not in (0, 24, 72, 168))
 
-        hint_lab = QLabel("到期仅在下次启动时清理暂存区；每日日志与快速指令库绝对安全", objectName="cardMeta")
+        hint_lab = QLabel("到期仅在下次启动时清理暂存区；每日日志与快捷指令库绝对安全", objectName="cardMeta")
         hint_lab.setStyleSheet("font-size: 10px;")
         rv.addWidget(hint_lab)
         cv.addWidget(card_ret)
@@ -1849,7 +1864,7 @@ class SettingsDialog(QDialog):
 
     def change_prompts_dir(self):
         d = QFileDialog.getExistingDirectory(
-            self, "选择快速指令（提示词库）保存目录 (可指定 Obsidian 库)",
+            self, "选择快捷指令（提示词库）保存目录 (可指定 Obsidian 库)",
             self.shelf.settings.get("prompts_dir", str(APP_DIR / "_Prompts")))
         if d:
             new_path = os.path.realpath(d)
@@ -1858,7 +1873,7 @@ class SettingsDialog(QDialog):
             self.prompts_lab.setToolTip(new_path)
             self.shelf.prompts = PromptsStore(Path(new_path))
             self.shelf.refresh_prompts_page()
-            self.shelf._toast("快速指令库目录已更新")
+            self.shelf._toast("快捷指令库目录已更新")
 
     def _toggle_custom_retention(self):
         self.set_retention(-1)
@@ -2095,7 +2110,7 @@ class HelpDialog(QDialog):
         title_box.setSpacing(2)
         h_title = QLabel("轻松剪贴板 (EasyClipboard) · 核心技巧与使用说明")
         h_title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {p['title']};")
-        h_sub = QLabel("双轨极速中转 · 永久剪贴记忆 · 快速指令库 · 极度轻量")
+        h_sub = QLabel("双轨极速中转 · 永久剪贴记忆 · 快捷指令库 · 极度轻量")
         h_sub.setStyleSheet(f"font-size: 11px; color: {p['meta']};")
         title_box.addWidget(h_title)
         title_box.addWidget(h_sub)
@@ -2253,12 +2268,12 @@ class HelpDialog(QDialog):
                 <li><b>双击卡片</b>：文字卡 = <b>立即复制全文</b>；附件卡 = <b>调用系统关联程序极速打开</b>。</li>
                 <li><b>空格键极速预览 (<kbd>Space</kbd>)</b>：鼠标悬停或单击选中任意卡片，按键盘空格键瞬时调出<b>高清大图/全文长文/文件详情</b>浮窗，再按空格即收！</li>
                 <li><b>整包外发交付</b>：在微信、企微、钉钉等聊天窗口中，长按底栏<b>「按住拖出全部选中附件」</b>，所有选中文件一次性批量拖入松手发送。</li>
-                <li><b>清空批次</b>：点击底部红色垃圾桶，瞬间重置工作台临时素材（每日工作日志与快速指令库受永久保护，绝不受影响）。</li>
+                <li><b>清空批次</b>：点击底部红色垃圾桶，瞬间重置工作台临时素材（每日工作日志与快捷指令库受永久保护，绝不受影响）。</li>
             </ul>
         </div>
 
         <div class="card">
-            <h2>⚡ 三、快速指令（提示词收藏夹与 Markdown 知识库）</h2>
+            <h2>⚡ 三、快捷指令（提示词收藏夹与 Markdown 知识库）</h2>
             <ul>
                 <li><b>独立本地 Markdown 存储</b>：每段提示词都是本地独立的 <code>.md</code> 文件，永不绑定私有格式。</li>
                 <li><b>资源管理器双向秒级直通</b>：
@@ -2319,7 +2334,7 @@ class Shelf(QWidget):
         global SHELF_DIR, SHELF_REAL, HISTORY_DIR, PINNED_DIR
         self.settings = load_settings()
         SHELF_DIR = Path(self.settings["shelf_dir"])
-        # ⚡ 快速指令区（提示词收藏夹）存储：默认 APP_DIR/_Prompts，
+        # ⚡ 快捷指令区（提示词收藏夹）存储：默认 APP_DIR/_Prompts，
         # 可在设置里改 prompts_dir（绝对路径直用，相对按 APP_DIR）
         _pd = Path(str(self.settings.get("prompts_dir") or "")).expanduser() \
             if str(self.settings.get("prompts_dir") or "").strip() else APP_DIR / "_Prompts"
@@ -2691,7 +2706,7 @@ class Shelf(QWidget):
         self.journal_btn2.clicked.connect(lambda: self._switch_view(2))
         foot_bar.addWidget(self.journal_btn2)
 
-        self.prompts_btn2 = QPushButton(" 快速指令")
+        self.prompts_btn2 = QPushButton(" 快捷指令")
         self.prompts_btn2.setIcon(_icon("bolt", theme_cfg["btn_primary"]))
         self.prompts_btn2.setIconSize(QSize(15, 15))
         self.prompts_btn2.setProperty("class", "footerBtn")
@@ -2735,6 +2750,11 @@ class Shelf(QWidget):
         addfile_btn.setProperty("class", "footerBtn")
         addfile_btn.clicked.connect(self.quick_add_file)
         qh.addWidget(addfile_btn)
+        mkdir_btn = QPushButton(" ➕ 新建文件夹")
+        mkdir_btn.setProperty("class", "footerBtn")
+        mkdir_btn.setToolTip("在快速访问区新建一个分类文件夹")
+        mkdir_btn.clicked.connect(lambda: self.quick_create_subfolder(parent_widget=self))
+        qh.addWidget(mkdir_btn)
         back_btn = QPushButton(" 返回素材")
         back_btn.setIcon(_icon("back", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
         back_btn.setIconSize(QSize(12, 12))
@@ -2818,13 +2838,13 @@ class Shelf(QWidget):
         hv.addWidget(self.help_view, stretch=1)
         self.view_stack.addWidget(self.help_page)
 
-        # ---- ⚡ 快速指令页（提示词收藏夹）：左分类 + 右文档
+        # ---- ⚡ 快捷指令页（提示词收藏夹）：左分类 + 右文档
         self.prompts_page = QWidget()
         pv = QVBoxLayout(self.prompts_page)
         pv.setContentsMargins(0, 0, 0, 0)
         pv.setSpacing(8)
         ph = QHBoxLayout()
-        ph.addWidget(QLabel("快速指令（提示词收藏夹）", objectName="colHeader"))
+        ph.addWidget(QLabel("快捷指令（提示词收藏夹）", objectName="colHeader"))
         ph.addStretch(1)
         newcat_btn = QPushButton(" 新建分类")
         newcat_btn.setIcon(_icon("plus", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
@@ -2845,7 +2865,7 @@ class Shelf(QWidget):
         prefresh_btn.setIcon(_icon("refresh", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
         prefresh_btn.setIconSize(QSize(12, 12))
         prefresh_btn.setProperty("class", "footerBtn")
-        prefresh_btn.setToolTip("从磁盘重新扫描并刷新快速指令")
+        prefresh_btn.setToolTip("从磁盘重新扫描并刷新快捷指令")
         prefresh_btn.clicked.connect(self.refresh_prompts_page)
         ph.addWidget(prefresh_btn)
 
@@ -2976,26 +2996,140 @@ class Shelf(QWidget):
             self.refresh_quick_page()
             self._toast("已加入快速访问")
 
-    def quick_ingest_files(self, paths):
-        """拖入快速访问区：实体拷入 _Pinned 托管区（像拷进一个文件夹），源文件不动"""
-        ok, fail = 0, 0
+    def get_pinned_subfolders(self) -> list[str]:
+        """获取快速访问区（_Pinned）已有的分类子文件夹列表"""
+        pdir = Path(self.settings.get("pinned_dir", str(PINNED_DIR)))
+        if not pdir.exists():
+            return []
+        try:
+            return sorted([e.name for e in os.scandir(pdir)
+                           if e.is_dir() and not e.name.startswith(("_", "."))])
+        except OSError:
+            return []
+
+    def quick_create_subfolder(self, parent_widget=None) -> str:
+        """在快速访问区新建分类文件夹"""
+        name, ok = QInputDialog.getText(
+            parent_widget or self, "新建分类文件夹", "请输入文件夹名称：")
+        if not ok or not str(name).strip():
+            return ""
+        clean = re.sub(r'[\\/:*?"<>|\r\n\t]+', " ", str(name).strip()).strip(" .")
+        if not clean:
+            self._toast("文件夹名称无效")
+            return ""
+        pdir = Path(self.settings.get("pinned_dir", str(PINNED_DIR)))
+        target = pdir / clean
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            self.refresh_quick_page()
+            self._qtoast(f"已创建分类文件夹：{clean}")
+            self._toast(f"已创建分类文件夹「{clean}」")
+            return clean
+        except OSError as e:
+            self._toast(f"创建文件夹失败：{e}")
+            return ""
+
+    def ingest_entry_to_pinned(self, entry: dict, subfolder: str = ""):
+        """从主界面卡片收录进快速访问区（支持指定分类子文件夹）"""
+        if not entry:
+            return
+        kind = entry.get("kind", "")
+        if kind == "text":
+            text = entry.get("text", "")
+            if not text.strip():
+                self._toast("内容为空")
+                return
+            first_line = ""
+            for line in text.splitlines():
+                if line.strip():
+                    first_line = line.strip()
+                    break
+            base_title = clean_name(first_line[:20]) if "clean_name" in globals() else "便签文本"
+            if not base_title:
+                base_title = "便签文本"
+            fname = f"{base_title}_{datetime.now():%H%M%S}.txt"
+            dst = unique_pinned_dest(fname, subfolder=subfolder)
+            try:
+                Path(dst).write_text(text, encoding="utf-8")
+                self.refresh_quick_page()
+                dest_name = subfolder if subfolder else "根目录"
+                self._toast(f"已存入快速访问「{dest_name}」")
+            except OSError as e:
+                self._toast(f"保存失败：{e}")
+            return
+
+        src = entry.get("src") or ""
+        if not src and kind == "image":
+            src = self._entry_path(entry.get("name", ""))
+        if src and os.path.exists(src):
+            self.quick_ingest_files([src], target_subfolder=subfolder)
+            dest_name = subfolder if subfolder else "根目录"
+            self._toast(f"已加入快速访问「{dest_name}」")
+        else:
+            self._toast("源文件已失效")
+
+    def quick_ingest_files(self, paths, target_dir=None, is_internal=False, target_subfolder=""):
+        """拖入快速访问区：
+        - 支持拖入指定的分类文件夹 target_dir 或 target_subfolder；
+        - 原路拖放防重：如果源文件已在目标文件夹中，严格跳过，不产生任何重复副本；
+        - 内部拖入文件夹为移动收纳语义。"""
+        pdir = Path(self.settings.get("pinned_dir", str(PINNED_DIR)))
+        if target_subfolder:
+            target_path = pdir / os.path.basename(target_subfolder.strip())
+        elif target_dir:
+            target_path = Path(target_dir)
+        else:
+            target_path = pdir
+
+        try:
+            target_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            target_path = pdir
+
+        target_real = os.path.realpath(str(target_path))
+        dest_display = target_path.name if target_real != os.path.realpath(str(pdir)) else "根目录"
+
+        ok, fail, same_count = 0, 0, 0
         for src in paths:
             if not os.path.exists(src):
                 continue
+            src_real = os.path.realpath(src)
+            base_name = os.path.basename(src)
+            expected_dst = os.path.realpath(os.path.join(target_real, base_name))
+
+            # 原路拖放防重判定
+            if src_real == expected_dst or os.path.realpath(os.path.dirname(src_real)) == target_real:
+                same_count += 1
+                continue
+
             try:
-                dst = unique_pinned_dest(os.path.basename(src))
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst)
+                rel_sub = ""
+                if target_real != os.path.realpath(str(pdir)):
+                    rel_sub = os.path.relpath(target_real, os.path.realpath(str(pdir)))
+                dst = unique_pinned_dest(base_name, subfolder=rel_sub)
+
+                if is_internal:
+                    shutil.move(src, dst)
                 else:
-                    shutil.copy2(src, dst)
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
                 ok += 1
             except (OSError, ValueError) as e:
                 fail += 1
                 print(f"[Shelf] 快速访问收录失败 {src}: {e}", file=sys.stderr)
+
         self.refresh_quick_page()
-        if ok:
-            self._qtoast(f"已收进快速访问 {ok} 项" + (f"（{fail} 项失败）" if fail else ""))
-        elif fail:
+        if same_count > 0 and ok == 0 and fail == 0:
+            self._qtoast("原路拖放，无需复制")
+        elif ok > 0:
+            action_str = "移动到" if is_internal else "收进"
+            msg = f"已{action_str}「{dest_display}」{ok} 项"
+            if fail:
+                msg += f"（{fail} 项失败）"
+            self._qtoast(msg)
+        elif fail > 0:
             self._qtoast(f"{fail} 项收录失败")
 
     # ---- 快速访问的文件操作（复制 / 剪切 / 粘贴 / 删除）
@@ -3095,16 +3229,26 @@ class Shelf(QWidget):
         item = self.quick_list.itemAt(pos)
         menu = QMenu(self)
         has_sel = bool(self._quick_selection_paths())
-        act_open = menu.addAction("打开")
+        if item is not None:
+            act_open = menu.addAction("打开")
+            menu.addSeparator()
+        else:
+            act_open = None
+        act_mkdir = menu.addAction("➕ 新建分类文件夹")
         menu.addSeparator()
         act_copy = menu.addAction("复制    Ctrl+C")
         act_cut = menu.addAction("剪切    Ctrl+X")
         act_paste = menu.addAction("粘贴    Ctrl+V")
-        menu.addSeparator()
-        act_del = menu.addAction("删除    Del")
+        if has_sel:
+            menu.addSeparator()
+            act_del = menu.addAction("删除    Del")
+        else:
+            act_del = None
         chosen = menu.exec(self.quick_list.mapToGlobal(pos))
         if chosen == act_open and item is not None:
             self._open_pinned_item(item.data(Qt.ItemDataRole.UserRole))
+        elif chosen == act_mkdir:
+            self.quick_create_subfolder(self)
         elif chosen == act_copy and has_sel:
             self.quick_copy_selected(cut=False)
         elif chosen == act_cut and has_sel:
@@ -3195,7 +3339,7 @@ class Shelf(QWidget):
         qp.setFixedSize(24, 24)
         qp.setIcon(_icon("bolt", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["btn_primary"], 12))
         qp.setIconSize(QSize(12, 12))
-        qp.setToolTip("收进快速指令（提示词收藏夹）")
+        qp.setToolTip("收进快捷指令（提示词收藏夹）")
         qp.clicked.connect(lambda *a, b=body: self.add_prompt_text(b))
         h.addWidget(qp)
         cp = QPushButton("", objectName="hoverActionBtn")
@@ -3213,7 +3357,7 @@ class Shelf(QWidget):
         self._write_own_clipboard(mime, self._suppress_signature([], body))
         self._toast("已复制这一条")
 
-    # ------------------------------------------------------ ⚡ 快速指令区（提示词收藏夹）
+    # ------------------------------------------------------ ⚡ 快捷指令区（提示词收藏夹）
     def refresh_prompts_page(self):
         """刷新分类列表（保留选中）+ 文档卡片。"""
         cur_item = self.prompt_cat_list.currentItem()
@@ -3288,7 +3432,7 @@ class Shelf(QWidget):
             self._toast(f"打开文件管理器失败：{e}")
 
     def _prompt_open_current_folder(self):
-        """在资源管理器中打开当前选中的分类文件夹（或快速指令根目录）。"""
+        """在资源管理器中打开当前选中的分类文件夹（或快捷指令根目录）。"""
         fold = self._prompt_current_folder()
         if fold:
             fpath = os.path.abspath(str(self.prompts.root / fold))
@@ -3409,13 +3553,15 @@ class Shelf(QWidget):
 
     def _prompt_copy(self, folder, name):
         text = self.prompts.read_doc(folder, name)
-        if not text.strip():
-            self._toast("内容为空")
+        if not text:
+            self._toast(f"「{name}」文档内容为空")
             return
+        if hasattr(self, "watcher") and self.watcher:
+            self.watcher.suppress(1.5)
         mime = QMimeData()
         mime.setText(text)
         self._write_own_clipboard(mime, self._suppress_signature([], text))
-        self._toast("已复制这条提示词")
+        self._toast(f"已复制「{name}」文档文本（共 {len(text)} 字）")
 
     # ---- 文本入收藏：从文字卡片/日志条目进入 ----
     def add_prompt_text(self, text: str):
@@ -3437,28 +3583,40 @@ class Shelf(QWidget):
             if hasattr(dlg, "deleteLater"):
                 dlg.deleteLater()
 
-    # ---- 素材卡片右键：文字=加入快速/删除；附件=加入快速访问区/删除 ----
+    # ---- 素材卡片右键：文字=加入快捷指令/加入快速访问区/删除；附件=加入快速访问区/删除 ----
     def _card_context_menu(self, card, pos):
         e = card.entry
         menu = QMenu(self)
         if e["kind"] == "text":
-            a_add = menu.addAction("加入快速…")
+            a_prompt = menu.addAction("⚡ 加入快捷指令（提示词）")
         else:
-            a_add = menu.addAction("加入快速访问区")
+            a_prompt = None
+
+        # 级联子菜单：加入快速访问区（支持选择具体子文件夹或新建）
+        pinned_menu = menu.addMenu("📌 加入快速访问区")
+        act_root = pinned_menu.addAction("📁 快速访问区根目录")
+        subfolders = self.get_pinned_subfolders()
+        folder_actions = {}
+        if subfolders:
+            pinned_menu.addSeparator()
+            for sf in subfolders:
+                folder_actions[pinned_menu.addAction(f"📂 {sf}")] = sf
+        pinned_menu.addSeparator()
+        act_new_folder = pinned_menu.addAction("➕ 新建分类文件夹并存入…")
+
         menu.addSeparator()
         a_del = menu.addAction("删除")
         chosen = menu.exec(card.mapToGlobal(pos))
-        if chosen == a_add:
-            if e["kind"] == "text":
-                self.add_prompt_text(e.get("text", ""))
-            else:
-                src = e.get("src") or ""
-                if not src and e["kind"] == "image":
-                    src = self._entry_path(e.get("name", ""))
-                if src and os.path.exists(src):
-                    self.quick_ingest_files([src])
-                else:
-                    self._toast("源文件已失效")
+        if chosen == a_prompt:
+            self.add_prompt_text(e.get("text", ""))
+        elif chosen == act_root:
+            self.ingest_entry_to_pinned(e, subfolder="")
+        elif chosen in folder_actions:
+            self.ingest_entry_to_pinned(e, subfolder=folder_actions[chosen])
+        elif chosen == act_new_folder:
+            new_f = self.quick_create_subfolder(self)
+            if new_f:
+                self.ingest_entry_to_pinned(e, subfolder=new_f)
         elif chosen == a_del:
             self.delete_entry(e)
             self._toast("已移除这条")
@@ -4978,15 +5136,16 @@ def _ensure_stdio() -> None:
         sys.stdout = f
 
 
-# ------------------------------------------------------------------ 快速指令区 UI 组件
+# ------------------------------------------------------------------ 快捷指令区 UI 组件
 class PromptDocCard(QFrame):
-    """快速指令页文档卡：双击=复制全文；右键=改名/编辑内容/置顶/删除。"""
+    """快捷指令页文档卡：双击=直接复制文档全文；右键=改名/编辑内容/置顶/删除。"""
 
     def __init__(self, shelf, folder: str, info: dict):
         super().__init__(objectName="card")
         self.shelf, self.folder, self.info = shelf, folder, info
         self.setFixedHeight(50)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("双击直接复制文档内文本 · 右键更多操作")
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: shelf._prompt_doc_ctx(self, pos))
@@ -4996,6 +5155,7 @@ class PromptDocCard(QFrame):
         h.setSpacing(8)
         if info["pinned"]:
             pin = QLabel()
+            pin.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             pin.setPixmap(_icon("pin", PALETTES.get(
                 shelf.settings.get("theme", "dark"), PALETTES["dark"])["btn_primary"], 11).pixmap(11, 11))
             pin.setFixedWidth(14)
@@ -5007,20 +5167,38 @@ class PromptDocCard(QFrame):
         nm_h.setSpacing(5)
         nm_h.setContentsMargins(0, 0, 0, 0)
         doc_ic = QLabel()
+        doc_ic.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         doc_ic.setPixmap(_icon("doc", PALETTES.get(self.shelf.settings.get("theme", "dark"), PALETTES["dark"])["meta"], 12).pixmap(12, 12))
         nm_h.addWidget(doc_ic)
-        nm_h.addWidget(QLabel(info["name"], objectName="cardName"))
+        name_lab = QLabel(info["name"], objectName="cardName")
+        name_lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        nm_h.addWidget(name_lab)
         nm_h.addStretch(1)
         col.addLayout(nm_h)
-        meta = f"{info["preview"]} · {info["chars"]}字" if info["preview"] \
-            else f"{info["chars"]}字"
-        col.addWidget(elided_label(meta, 380, "cardMeta"))
+        meta = f"{info['preview']} · {info['chars']}字" if info["preview"] \
+            else f"{info['chars']}字"
+        meta_lab = elided_label(meta, 380, "cardMeta")
+        meta_lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        col.addWidget(meta_lab)
         h.addLayout(col, stretch=1)
 
+        copy_btn = QPushButton()
+        copy_btn.setIcon(_icon("copy", PALETTES.get(
+            shelf.settings.get("theme", "dark"), PALETTES["dark"])["meta"], 13))
+        copy_btn.setIconSize(QSize(13, 13))
+        copy_btn.setFixedSize(26, 26)
+        copy_btn.setProperty("class", "footerBtn")
+        copy_btn.setToolTip("复制文档文本")
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        copy_btn.clicked.connect(lambda: self.shelf._prompt_copy(self.folder, self.info["name"]))
+        h.addWidget(copy_btn)
+
     def mouseDoubleClickEvent(self, ev):
-        self.shelf._prompt_copy(self.folder, self.info["name"])
-        if ev is not None:
-            super().mouseDoubleClickEvent(ev)
+        if ev is not None and ev.button() == Qt.MouseButton.LeftButton:
+            self.shelf._prompt_copy(self.folder, self.info["name"])
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
 
 
 class PromptCategoryDialog(QDialog):
@@ -5046,7 +5224,7 @@ class PromptCategoryDialog(QDialog):
         v.setContentsMargins(16, 14, 16, 14)
         v.setSpacing(8)
 
-        v.addWidget(QLabel("收进快速指令", objectName="previewTitle"))
+        v.addWidget(QLabel("收进快捷指令", objectName="previewTitle"))
 
         # 1. 已有分类下拉列表（带 📁 图标与清晰箭头）
         v.addWidget(QLabel("选择已有分类文件夹：", objectName="cardMeta"))

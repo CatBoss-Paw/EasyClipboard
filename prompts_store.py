@@ -1,4 +1,4 @@
-"""快速指令区（提示词收藏夹）存储层 —— 纯 Python，不依赖 Qt。
+"""快捷指令区（提示词收藏夹）存储层 —— 纯 Python，不依赖 Qt。
 
 布局（后台独立文件夹，默认 APP_DIR/_Prompts，可在 settings.prompts_dir 自定义）：
 
@@ -223,9 +223,12 @@ class PromptsStore:
         return path
 
     def read_doc(self, folder: str, name: str) -> str:
+        clean = name[:-3] if name.lower().endswith(".md") else name
+        p = self.root / folder / f"{clean}.md"
+        if not p.is_file():
+            p = self.root / folder / name
         try:
-            return (self.root / folder / f"{name}.md").read_text(
-                encoding="utf-8", errors="ignore")
+            return p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return ""
 
