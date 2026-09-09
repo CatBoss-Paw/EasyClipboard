@@ -34,7 +34,7 @@ from icons import icon as _icon
 from PyQt6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QFont,
                           QDrag, QIcon, QAction, QKeySequence,
                           QShortcut, QLinearGradient, QPainterPath,
-                          QImageReader, QPixmapCache, QDesktopServices, QCursor)
+                          QImage, QImageReader, QPixmapCache, QDesktopServices, QCursor)
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
                               QVBoxLayout, QHBoxLayout, QScrollArea,
                               QFrame, QSystemTrayIcon, QMenu, QMessageBox,
@@ -1184,6 +1184,7 @@ class ShelfCard(QFrame):
 
         # 2. 徽标 / 缩略图（仅保留 32x32，杜绝内存常驻）
         badge_box = self._create_badge()
+        badge_box.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout.addWidget(badge_box)
 
         # 3. 核心文本
@@ -1208,6 +1209,8 @@ class ShelfCard(QFrame):
             self.meta_lab = elided_label(f"{e.get('ts', '-')} · {fmt_size(e.get('size', 0))}{dead}",
                                          w_limit, "cardMeta")
 
+        self.title_lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.meta_lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         info_col.addWidget(self.title_lab)
         info_col.addWidget(self.meta_lab)
         layout.addLayout(info_col, stretch=1)
@@ -1502,7 +1505,7 @@ class QuickList(QListWidget):
         self.shelf = shelf
         self.setAcceptDrops(True)
         self.setDragEnabled(True)          # 允许触发拖出（startDrag 自定义实体外发）
-        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.shelf._quick_context_menu)
 
@@ -1515,9 +1518,21 @@ class QuickList(QListWidget):
             return
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        if len(paths) == 1:
+            ext = os.path.splitext(paths[0])[1].lower()
+            if ext in ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'):
+                img = QImage(paths[0])
+                if not img.isNull():
+                    mime.setImageData(img)
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.CopyAction)
+        try:
+            drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
+        finally:
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
 
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasUrls():
@@ -4755,10 +4770,6 @@ class Shelf(QWidget):
         """兼容保留"""
         self.start_batch_drag()
 
-    def _on_drag_button_clicked(self):
-        """兼容保留"""
-        self.start_batch_drag()
-
     # ------------------------------------------------------------ 右下角缩放
     def _resize_hot_rect(self) -> QRect:
         """缩放热区 = 【看得见的 ◢】 ∩ 【窗口真右下角】的并集。
@@ -4934,7 +4945,7 @@ class Shelf(QWidget):
         super().mouseReleaseEvent(ev)
 
     def start_card_drag(self, entry: dict):
-        """统一卡片拖拽入口：文本拖出纯文字；图片/文件拖本体（勾选卡片=整包）"""
+        """统一卡片拖拽入口：文本拖出纯文字；图片/文件拖本体"""
         # 隐藏窗口上启动 QDrag 会原生崩溃（F9 竞速防护）
         if not self.isVisible():
             print("[Shelf] 窗口已隐藏，放弃本次拖出", file=sys.stderr, flush=True)
@@ -4948,30 +4959,27 @@ class Shelf(QWidget):
                 drag.setMimeData(mime)
                 drag.setPixmap(self._make_drag_pixmap(1))
                 drag.setHotSpot(QPoint(30, 20))
-                drag.exec(Qt.DropAction.CopyAction)
+                drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
             finally:
                 self._drag_active = False
+                try:
+                    self.releaseMouse()
+                except Exception:
+                    pass
                 gc.collect()
             return
         self.start_files_drag(entry)
 
     def start_files_drag(self, entry: dict):
-        selected_files = self._get_selected_files()
-        # 产品铁律：默认全不选，on 的默认值必须为 False（全仓其余 12 处均为 False）。
-        # 此处原写 True，与铁律相反。当前 entry 的 on 键总存在
-        # （_add_entry / _load_manifest 均做 setdefault("on", False)），故该默认值
-        # 分支不可达，不构成现行为错误；但属于同类地雷，统一为 False 以防未来回归。
-        is_current_on = entry.get("on", False)
-        if is_current_on and len(selected_files) > 1:
-            drag_files = selected_files
-        else:
-            drag_files = self._get_entry_files(entry)
+        # 彻底解决用户反馈的“强行多选”问题：
+        # 单张卡片直接拖动 = 永远只拖出该卡片单项自身，绝不强行打包其余勾选附件！
+        # 批量打包整包拖出专属保留给底栏「按住批量拖出」按钮
+        drag_files = self._get_entry_files(entry)
 
         if drag_files:
             self._execute_drag(drag_files)
         else:
-            # 【不得静默】源文件已被移动/删除时，_get_entry_files 返回空，
-            # 原本直接什么都不做 —— 用户拖了没反应也不知道为什么。
+            # 【不得静默】源文件已被移动/删除时，_get_entry_files 返回空
             self._toast("源文件已失效，无法拖出")
             print(f"[Shelf] 拖出中止：源文件已失效 kind={entry.get('kind')} "
                   f"name={entry.get('name')!r}", file=sys.stderr, flush=True)
@@ -4984,6 +4992,15 @@ class Shelf(QWidget):
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(f) for f in drag_files])
 
+        # 针对微信等聊天软件优化：单张图片拖拽时，同时注入 QImage 位图数据 (CF_DIB / CF_BITMAP)
+        # 微信在拖放接收区如果识别到位图，能立即激活图片发送预览，杜绝因仅有 file:// 导致拒绝 OLE 拖放并降级为鼠标拉框框
+        if len(drag_files) == 1:
+            ext = os.path.splitext(drag_files[0])[1].lower()
+            if ext in ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'):
+                img = QImage(drag_files[0])
+                if not img.isNull():
+                    mime.setImageData(img)
+
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.setPixmap(self._make_drag_pixmap(len(drag_files)))
@@ -4992,9 +5009,14 @@ class Shelf(QWidget):
         print(f"[Shelf] 开始直接拖出: {len(drag_files)} 个附件", file=sys.stderr, flush=True)
         self._drag_active = True
         try:
-            drag.exec(Qt.DropAction.CopyAction)
+            # 允许 CopyAction 和 MoveAction（微信聊天窗口接受拖放时经常要求 MoveAction，只给 Copy 会直接触发 Drop Cancel 导致微信界面识别为鼠标框选）
+            drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
         finally:
             self._drag_active = False
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
         # 拖拽结束：统一补处理拖拽期间积累的剪贴板事件
         if self._pending_clip:
             self._pending_clip = False
