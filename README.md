@@ -45,22 +45,22 @@
 
 ```mermaid
 graph TB
-    subgraph 🖥️ 用户日常操作
-        A[Ctrl+C 复制文字] --> W
-        B[截图工具截取图片] --> W
-        C[复制文件 / 文件夹] --> W
+    subgraph S1 ["🖥️ 用户日常操作"]
+        A["Ctrl+C 复制文字"] --> W
+        B["截图工具截取图片"] --> W
+        C["复制文件 / 文件夹"] --> W
     end
 
-    W[🕵️ 常驻看守进程<br/>轻松剪贴板-看守.exe<br/>无Qt · 常驻 28MB · CPU 0%] -->|毫秒级安全捕获| SHELF[📋 双轨临时工作台]
-    W -->|时间线自动追加| JOURNAL[📓 每日工作剪贴日志<br/>YYYY-MM-DD.md 永不丢失]
+    W["🕵️ 常驻看守进程<br/>轻松剪贴板-看守.exe<br/>无Qt · 常驻 28MB · CPU 0%"] -->|毫秒级安全捕获| SHELF["📋 双轨临时工作台"]
+    W -->|时间线自动追加| JOURNAL["📓 每日工作剪贴日志<br/>YYYY-MM-DD.md 永不丢失"]
 
-    SHELF --> LEFT[📂 左轨：附件 / 截图 / 文件 / 文件夹]
-    SHELF --> RIGHT[📝 右轨：文字碎片 / 网址链接]
+    SHELF --> LEFT["📂 左轨：附件 / 截图 / 文件 / 文件夹"]
+    SHELF --> RIGHT["📝 右轨：文字碎片 / 网址链接"]
 
-    LEFT -->|多选勾选 / 批量聚合| DRAG[📦 一键拖拽交付<br/>直拖进微信 / 企微 / 钉钉 / 浏览器]
-    RIGHT -->|双击单条秒复制| CLIP[⚡ 立即复制回剪贴板]
+    LEFT -->|多选勾选 / 批量聚合| DRAG["📦 一键拖拽交付<br/>直拖进微信 / 企微 / 钉钉 / 浏览器"]
+    RIGHT -->|双击单条秒复制| CLIP["⚡ 立即复制回剪贴板"]
 
-    PROMPT[⚡ 快速指令库<br/>可无缝挂载 Obsidian 知识库] -.->|一键收纳 / 快速调用| RIGHT
+    PROMPT["⚡ 快速指令库<br/>可无缝挂载 Obsidian 知识库"] -.->|一键收纳 / 快速调用| RIGHT
 
     style W fill:#e8f5e9,stroke:#43a047,color:#000
     style SHELF fill:#e3f2fd,stroke:#1e88e5,color:#000
@@ -88,14 +88,14 @@ graph TB
 
 ```mermaid
 graph LR
-    ITEM[选中任意卡片并按 Space] --> TYPE{内容类型}
-    TYPE -->|高清截图| P1[📷 800x560 超清大图，底部呈现原图尺寸与格式]
-    TYPE -->|纯文本| P2[📝 智能自适应字号 15px，短文本自动收缩，支持一键复制全文]
-    TYPE -->|Word .docx| P3[📄 零依赖免装 Office，直接提炼通读全文段落]
-    TYPE -->|Excel .xlsx| P4[📊 自动解析核心单元格数据，网格化全貌速览]
-    TYPE -->|PPT .pptx| P5[📽️ 幻灯片逐页提取大纲标题与讲义正文]
-    TYPE -->|PDF / 代码| P6[📑 完整大窗排版阅读，支持 .py / .md / .json 等]
-    TYPE -->|文件夹| P7[📁 展示专属金色大图标、子项统计与直通资源管理器打开]
+    ITEM["选中任意卡片并按 Space"] --> TYPE{"内容类型"}
+    TYPE -->|高清截图| P1["📷 800x560 超清大图，底部呈现原图尺寸与格式"]
+    TYPE -->|纯文本| P2["📝 智能自适应字号 15px，短文本自动收缩，支持一键复制全文"]
+    TYPE -->|Word文档| P3["📄 零依赖免装 Office，直接提炼通读全文段落"]
+    TYPE -->|Excel表格| P4["📊 自动解析核心单元格数据，网格化全貌速览"]
+    TYPE -->|PPT幻灯片| P5["📽️ 幻灯片逐页提取大纲标题与讲义正文"]
+    TYPE -->|PDF与代码| P6["📑 完整大窗排版阅读，支持 py / md / json 等"]
+    TYPE -->|文件夹| P7["📁 展示专属金色大图标、子项统计与直通资源管理器打开"]
 
     style ITEM fill:#e3f2fd,stroke:#1e88e5,color:#000
     style TYPE fill:#fff8e1,stroke:#f9a825,color:#000
