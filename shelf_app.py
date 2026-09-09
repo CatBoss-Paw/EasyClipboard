@@ -33,7 +33,7 @@ from icons import icon as _icon
 from PyQt6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QFont,
                           QDrag, QIcon, QAction, QKeySequence,
                           QShortcut, QLinearGradient, QPainterPath,
-                          QImageReader, QPixmapCache, QDesktopServices)
+                          QImageReader, QPixmapCache, QDesktopServices, QCursor)
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
                               QVBoxLayout, QHBoxLayout, QScrollArea,
                               QFrame, QSystemTrayIcon, QMenu, QMessageBox,
@@ -1973,6 +1973,52 @@ class SettingsDialog(QDialog):
             self.pinned_lab.setText(self.shelf.settings["pinned_dir"])
             self.pinned_lab.setToolTip(self.shelf.settings["pinned_dir"])
 
+    def refresh_values(self):
+        """重新打开设置面板时，将所有控件与当前最新配置同步"""
+        cur_theme = self.shelf.settings.get("theme", "dark")
+        self.t_dark.setChecked(cur_theme == "dark")
+        self.t_light.setChecked(cur_theme == "light")
+
+        self.glass_cb.setChecked(bool(self.shelf.settings.get("glass", True)))
+
+        cur_op = int(self.shelf.settings.get("opacity", 96))
+        self.slider.setValue(cur_op)
+        self.op_val.setText(f"{cur_op}%")
+
+        if hasattr(self, "dir_lab"):
+            d = self.shelf.settings.get("shelf_dir", str(SHELF_DIR))
+            self.dir_lab.setText(d)
+            self.dir_lab.setToolTip(d)
+        if hasattr(self, "hist_lab"):
+            d = self.shelf.settings.get("history_dir", str(HISTORY_DIR))
+            self.hist_lab.setText(d)
+            self.hist_lab.setToolTip(d)
+        if hasattr(self, "pinned_lab"):
+            d = self.shelf.settings.get("pinned_dir", str(PINNED_DIR))
+            self.pinned_lab.setText(d)
+            self.pinned_lab.setToolTip(d)
+        if hasattr(self, "prompts_lab"):
+            d = self.shelf.settings.get("prompts_dir", str(APP_DIR / "_Prompts"))
+            self.prompts_lab.setText(d)
+            self.prompts_lab.setToolTip(d)
+
+        cur_h = int(self.shelf.settings.get("auto_clear_hours", 168) or 0)
+        self.keep_168.setChecked(cur_h == 168)
+        self.keep_72.setChecked(cur_h == 72)
+        self.keep_24.setChecked(cur_h == 24)
+        self.keep_never.setChecked(cur_h == 0)
+        self.keep_custom.setChecked(cur_h not in (0, 24, 72, 168))
+        self.custom_row.setVisible(cur_h not in (0, 24, 72, 168))
+        if cur_h not in (0, 24, 72, 168):
+            cur_days = max(1, cur_h // 24) if cur_h > 0 else 7
+            self.custom_days_edit.setText(str(cur_days))
+
+        if hasattr(self, "hotkey_edit"):
+            self.hotkey_edit.setText(self.shelf.settings.get("hotkey", "f9"))
+        if hasattr(self, "auto_cb"):
+            self.auto_cb.setChecked(self.shelf.autostart_enabled())
+
+
 
 # ------------------------------------------------------------------ 完整功能使用帮助大弹窗
 class HelpDialog(QDialog):
@@ -2492,8 +2538,9 @@ class Shelf(QWidget):
 
         self.gear_btn = QPushButton("")
         self.gear_btn.setProperty("class", "iconBtn")
-        self.gear_btn.setToolTip("设置")
-        self.gear_btn.setFixedWidth(26)
+        self.gear_btn.setToolTip("设置 (主题、路径、热键、开机自启)")
+        self.gear_btn.setFixedSize(26, 24)
+        self.gear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.gear_btn.setIcon(_icon("gear", PALETTES[self.settings.get("theme", "dark")]["icon"]))
         self.gear_btn.setIconSize(QSize(16, 16))
         self.gear_btn.clicked.connect(self.open_settings)
@@ -3645,16 +3692,49 @@ class Shelf(QWidget):
         self._help_dlg.move(x, y)
 
     def open_settings(self):
-        if self._settings_dlg is None:
+        if not hasattr(self, "_settings_dlg") or self._settings_dlg is None:
             self._settings_dlg = SettingsDialog(self)
-            self._settings_dlg.show()
         else:
-            self._settings_dlg.raise_()
-        # 固定弹到主窗口左侧（折叠/移动后也能一眼看到）
-        g = self.frameGeometry()
-        x = max(10, g.left() - 380)
-        y = max(10, g.top())
+            if hasattr(self._settings_dlg, "refresh_values"):
+                self._settings_dlg.refresh_values()
+
+        # 无论之前是隐藏、最小化还是初次打开，必须显式调用 show() 保证可见
+        self._settings_dlg.show()
+        self._settings_dlg.raise_()
+        self._settings_dlg.activateWindow()
+
+        # 智能动态计算居中与贴靠位置（适配多显示器与可用工作区）
+        screen = None
+        if self.isVisible():
+            screen = QGuiApplication.screenAt(self.geometry().center())
+        if screen is None:
+            screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+
+        screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        dlg_w = self._settings_dlg.width()
+        dlg_h = self._settings_dlg.height()
+
+        if self.isVisible():
+            g = self.frameGeometry()
+            # 优先摆在主窗口左侧，保持 8px 呼吸间隔（彻底解决过去 -380 导致的 80px 严重遮挡重叠）
+            if g.left() - dlg_w - 8 >= screen_geo.left():
+                x = g.left() - dlg_w - 8
+            # 若左侧空间不够，摆在主窗口右侧
+            elif g.right() + 8 + dlg_w <= screen_geo.right():
+                x = g.right() + 8
+            # 若左右均不够，屏幕水平居中
+            else:
+                x = screen_geo.left() + max(10, (screen_geo.width() - dlg_w) // 2)
+
+            # 纵向对齐：优先与主窗口对齐，严格限制在屏幕可用高度内（防止底部确定按钮被任务栏遮挡）
+            y = max(screen_geo.top() + 10, min(screen_geo.bottom() - dlg_h - 10, g.top()))
+        else:
+            # 主窗口未显示时（如托盘右键直接打开选项设置），直接居中显示
+            x = screen_geo.left() + max(10, (screen_geo.width() - dlg_w) // 2)
+            y = screen_geo.top() + max(10, (screen_geo.height() - dlg_h) // 2)
+
         self._settings_dlg.move(x, y)
+        self._settings_dlg.show()
         self._settings_dlg.raise_()
         self._settings_dlg.activateWindow()
 

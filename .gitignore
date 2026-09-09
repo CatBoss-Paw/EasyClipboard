@@ -5,9 +5,10 @@ __pycache__/
 *.so
 *.egg-info/
 *.egg
-dist/
+# 打包中间产物（产物本身通过 Release 分发，不入仓库）
 build/
-*.spec.bak
+dist/
+*.zip
 
 # ========== PyInstaller ==========
 # 打包中间产物（产物本身通过 Release 分发，不入仓库）
