@@ -1509,7 +1509,7 @@ class QuickList(QListWidget):
     def startDrag(self, actions):
         paths = [i.data(Qt.ItemDataRole.UserRole)
                  for i in self.selectedItems()
-                 if i.data(Qt.ItemDataRole.UserRole)]
+                 if i.data(Qt.ItemDataRole.UserRole) and i.data(Qt.ItemDataRole.UserRole) != "__UP__"]
         paths = [p for p in paths if os.path.exists(p)]
         if not paths:
             return
@@ -1526,6 +1526,12 @@ class QuickList(QListWidget):
     def dragMoveEvent(self, ev):
         if ev.mimeData().hasUrls():
             ev.acceptProposedAction()
+            pos = ev.position().toPoint() if hasattr(ev, "position") else ev.pos()
+            item = self.itemAt(pos)
+            if item is not None:
+                p = item.data(Qt.ItemDataRole.UserRole)
+                if p == "__UP__" or (p and os.path.isdir(str(p))):
+                    self.setCurrentItem(item)
 
     def dropEvent(self, ev):
         locals_ = [u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()]
@@ -1535,8 +1541,15 @@ class QuickList(QListWidget):
             target_dir = None
             if target_item is not None:
                 ipath = target_item.data(Qt.ItemDataRole.UserRole)
-                if ipath and os.path.isdir(ipath):
-                    target_dir = ipath
+                if ipath == "__UP__":
+                    pdir_root = Path(self.shelf.settings.get("pinned_dir", str(PINNED_DIR))).resolve()
+                    cur = getattr(self.shelf, "quick_current_dir", pdir_root)
+                    target_dir = cur.parent if cur != pdir_root else pdir_root
+                elif ipath and os.path.isdir(str(ipath)):
+                    target_dir = Path(ipath)
+            if target_dir is None:
+                pdir_root = Path(self.shelf.settings.get("pinned_dir", str(PINNED_DIR))).resolve()
+                target_dir = getattr(self.shelf, "quick_current_dir", pdir_root)
             is_internal = (ev.source() is self)
             self.shelf.quick_ingest_files(locals_, target_dir=target_dir, is_internal=is_internal)
         ev.acceptProposedAction()
@@ -2349,6 +2362,7 @@ class Shelf(QWidget):
 
         PINNED_DIR = Path(self.settings.get("pinned_dir", str(APP_DIR / "_Pinned")))
         PINNED_DIR.mkdir(parents=True, exist_ok=True)
+        self.quick_current_dir = PINNED_DIR.resolve()
 
         self._pinned = True
         self._collapsed = False
@@ -2735,7 +2749,16 @@ class Shelf(QWidget):
         qv.setSpacing(8)
 
         qh = QHBoxLayout()
-        qh.addWidget(QLabel("快速访问（双击直达 · 固定不消失）", objectName="colHeader"))
+        self.quick_up_btn = QPushButton(" ⬅ 上级")
+        self.quick_up_btn.setIcon(_icon("back", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
+        self.quick_up_btn.setIconSize(QSize(12, 12))
+        self.quick_up_btn.setProperty("class", "footerBtn")
+        self.quick_up_btn.setToolTip("返回上一层目录")
+        self.quick_up_btn.clicked.connect(self.quick_nav_up)
+        self.quick_up_btn.setVisible(False)
+        qh.addWidget(self.quick_up_btn)
+        self.quick_header_lab = QLabel("快速访问", objectName="colHeader")
+        qh.addWidget(self.quick_header_lab)
         qh.addStretch(1)
         addf_btn = QPushButton(" 加文件夹")
         addf_btn.setIcon(_icon("plus", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
@@ -2764,8 +2787,7 @@ class Shelf(QWidget):
         qv.addLayout(qh)
 
         self.quick_list = QuickList(self)
-        self.quick_list.itemDoubleClicked.connect(
-            lambda item: self._open_pinned_item(item.data(Qt.ItemDataRole.UserRole)))
+        self.quick_list.itemDoubleClicked.connect(self._on_quick_item_double_clicked)
         qv.addWidget(self.quick_list, stretch=1)
         self.quick_hint_lab = QLabel("文件夹式操作：Ctrl+C 复制 · Ctrl+X 剪切 · Ctrl+V 粘贴 · Delete 删除 · 拖入收纳 · 拖出外发",
                                      objectName="cardMeta")
@@ -2945,28 +2967,99 @@ class Shelf(QWidget):
         except OSError as e:
             print(f"[Shelf] 快速访问保存失败: {e}", file=sys.stderr)
 
+    def quick_nav_to(self, dir_path):
+        """在快速访问区内部进入子文件夹（层层深入）"""
+        p = Path(dir_path).resolve()
+        if p.is_dir():
+            self.quick_current_dir = p
+            self.refresh_quick_page()
+
+    def quick_nav_up(self):
+        """返回上一层目录"""
+        pdir_root = Path(self.settings.get("pinned_dir", str(PINNED_DIR))).resolve()
+        if not hasattr(self, "quick_current_dir") or not self.quick_current_dir:
+            self.quick_current_dir = pdir_root
+            return
+        cur = Path(self.quick_current_dir).resolve()
+        if cur != pdir_root:
+            parent = cur.parent
+            try:
+                if os.path.commonpath([str(parent), str(pdir_root)]) == str(pdir_root):
+                    self.quick_current_dir = parent
+                else:
+                    self.quick_current_dir = pdir_root
+            except Exception:
+                self.quick_current_dir = pdir_root
+            self.refresh_quick_page()
+
+    def _on_quick_item_double_clicked(self, item):
+        """双击条目：文件夹层层进入；文件外部打开"""
+        if item is None:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        if path == "__UP__":
+            self.quick_nav_up()
+            return
+        if os.path.isdir(str(path)):
+            self.quick_nav_to(path)
+        elif os.path.exists(str(path)):
+            self._open_pinned_item(path)
+
     def refresh_quick_page(self):
         self.quick_list.clear()
-        # 1) 外部快捷入口（pinned_dir/_links.json）
-        for p in self._load_quick_links():
-            if os.path.isdir(p):
-                item = QListWidgetItem(f"📁  {p}")
-            elif os.path.exists(p):
-                item = QListWidgetItem(f"📄  {p}")
+        pdir_root = Path(self.settings.get("pinned_dir", str(PINNED_DIR))).resolve()
+        if not hasattr(self, "quick_current_dir") or not self.quick_current_dir:
+            self.quick_current_dir = pdir_root
+        else:
+            try:
+                self.quick_current_dir = Path(self.quick_current_dir).resolve()
+            except Exception:
+                self.quick_current_dir = pdir_root
+
+        is_root = (self.quick_current_dir == pdir_root)
+        if getattr(self, "quick_up_btn", None) is not None:
+            self.quick_up_btn.setVisible(not is_root)
+        if getattr(self, "quick_header_lab", None) is not None:
+            if is_root:
+                self.quick_header_lab.setText("快速访问（双击文件夹进入 · 拖入收纳）")
             else:
-                item = QListWidgetItem(f"⚠️  已失效: {p}")
-            item.setData(Qt.ItemDataRole.UserRole, p)
-            self.quick_list.addItem(item)
-        # 2) _Pinned 专属区内的实体文件/文件夹
-        pdir = Path(self.settings.get("pinned_dir", str(PINNED_DIR)))
+                try:
+                    rel = self.quick_current_dir.relative_to(pdir_root)
+                    self.quick_header_lab.setText(f"📂 快速访问 / {rel}")
+                except Exception:
+                    self.quick_header_lab.setText(f"📂 {self.quick_current_dir.name}")
+
+        # 若在子目录，列表第1项插入返回上一级
+        if not is_root:
+            up_item = QListWidgetItem("📁  ..  [返回上一级]")
+            up_item.setData(Qt.ItemDataRole.UserRole, "__UP__")
+            up_item.setToolTip("双击返回上一层目录")
+            self.quick_list.addItem(up_item)
+
+        # 1) 仅在根目录展示外部快捷入口（_links.json）
+        if is_root:
+            for p in self._load_quick_links():
+                if os.path.isdir(p):
+                    item = QListWidgetItem(f"📁  {p}")
+                elif os.path.exists(p):
+                    item = QListWidgetItem(f"📄  {p}")
+                else:
+                    item = QListWidgetItem(f"⚠️  已失效: {p}")
+                item.setData(Qt.ItemDataRole.UserRole, p)
+                self.quick_list.addItem(item)
+
+        # 2) 当前目录下的实体文件/文件夹
+        cur_dir = self.quick_current_dir
         try:
-            names = sorted(os.listdir(pdir))
+            names = sorted(os.listdir(cur_dir))
         except OSError:
             names = []
         for n in names:
-            if n.startswith("_"):
+            if n.startswith("_") or n.startswith("."):
                 continue
-            p = os.path.join(pdir, n)
+            p = os.path.join(cur_dir, n)
             if os.path.isdir(p):
                 item = QListWidgetItem(f"📁  {n}")
             else:
@@ -3008,7 +3101,7 @@ class Shelf(QWidget):
             return []
 
     def quick_create_subfolder(self, parent_widget=None) -> str:
-        """在快速访问区新建分类文件夹"""
+        """在快速访问区当前目录下新建分类文件夹"""
         name, ok = QInputDialog.getText(
             parent_widget or self, "新建分类文件夹", "请输入文件夹名称：")
         if not ok or not str(name).strip():
@@ -3017,8 +3110,9 @@ class Shelf(QWidget):
         if not clean:
             self._toast("文件夹名称无效")
             return ""
-        pdir = Path(self.settings.get("pinned_dir", str(PINNED_DIR)))
-        target = pdir / clean
+        pdir_root = Path(self.settings.get("pinned_dir", str(PINNED_DIR))).resolve()
+        base_dir = getattr(self, "quick_current_dir", pdir_root)
+        target = Path(base_dir) / clean
         try:
             target.mkdir(parents=True, exist_ok=True)
             self.refresh_quick_page()
@@ -3030,7 +3124,7 @@ class Shelf(QWidget):
             return ""
 
     def ingest_entry_to_pinned(self, entry: dict, subfolder: str = ""):
-        """从主界面卡片收录进快速访问区（支持指定分类子文件夹）"""
+        """从主界面卡片收录进快速访问区（统一存为标准 MD 格式，绝不存 txt）"""
         if not entry:
             return
         kind = entry.get("kind", "")
@@ -3044,16 +3138,21 @@ class Shelf(QWidget):
                 if line.strip():
                     first_line = line.strip()
                     break
-            base_title = clean_name(first_line[:20]) if "clean_name" in globals() else "便签文本"
+            base_title = clean_name(first_line[:25]) if "clean_name" in globals() else "便签笔记"
             if not base_title:
-                base_title = "便签文本"
-            fname = f"{base_title}_{datetime.now():%H%M%S}.txt"
+                base_title = "便签笔记"
+            fname = f"{base_title}_{datetime.now():%H%M%S}.md"
             dst = unique_pinned_dest(fname, subfolder=subfolder)
+            body = text.strip()
+            if not body.startswith("#"):
+                md_content = f"# {base_title}\n\n{body}\n"
+            else:
+                md_content = f"{body}\n"
             try:
-                Path(dst).write_text(text, encoding="utf-8")
+                Path(dst).write_text(md_content, encoding="utf-8")
                 self.refresh_quick_page()
                 dest_name = subfolder if subfolder else "根目录"
-                self._toast(f"已存入快速访问「{dest_name}」")
+                self._toast(f"已保存为 MD 笔记并收进快速访问「{dest_name}」")
             except OSError as e:
                 self._toast(f"保存失败：{e}")
             return
@@ -3229,24 +3328,47 @@ class Shelf(QWidget):
         item = self.quick_list.itemAt(pos)
         menu = QMenu(self)
         has_sel = bool(self._quick_selection_paths())
-        if item is not None:
+        act_enter = None
+        act_open = None
+        act_reveal = None
+        act_up = None
+
+        item_path = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if item_path == "__UP__":
+            act_up = menu.addAction("⬅ 返回上一级")
+        elif item_path and os.path.isdir(str(item_path)):
+            act_enter = menu.addAction("📂 进入文件夹")
+            act_reveal = menu.addAction("在资源管理器中打开")
+            menu.addSeparator()
+        elif item_path and os.path.exists(str(item_path)):
             act_open = menu.addAction("打开")
+            act_reveal = menu.addAction("在资源管理器中定位")
             menu.addSeparator()
         else:
-            act_open = None
+            pdir_root = Path(self.settings.get("pinned_dir", str(PINNED_DIR))).resolve()
+            if getattr(self, "quick_current_dir", pdir_root) != pdir_root:
+                act_up = menu.addAction("⬅ 返回上一级")
+
         act_mkdir = menu.addAction("➕ 新建分类文件夹")
         menu.addSeparator()
         act_copy = menu.addAction("复制    Ctrl+C")
         act_cut = menu.addAction("剪切    Ctrl+X")
         act_paste = menu.addAction("粘贴    Ctrl+V")
-        if has_sel:
+        if has_sel and item_path != "__UP__":
             menu.addSeparator()
             act_del = menu.addAction("删除    Del")
         else:
             act_del = None
+
         chosen = menu.exec(self.quick_list.mapToGlobal(pos))
-        if chosen == act_open and item is not None:
-            self._open_pinned_item(item.data(Qt.ItemDataRole.UserRole))
+        if chosen == act_up:
+            self.quick_nav_up()
+        elif chosen == act_enter and item_path:
+            self.quick_nav_to(item_path)
+        elif chosen == act_reveal and item_path:
+            self._reveal_in_explorer(item_path)
+        elif chosen == act_open and item_path:
+            self._open_pinned_item(item_path)
         elif chosen == act_mkdir:
             self.quick_create_subfolder(self)
         elif chosen == act_copy and has_sel:
