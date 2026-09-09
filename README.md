@@ -83,9 +83,10 @@ graph TB
     W -->|自动归入分流| RIGHT
     W -->|后台时间戳追加| J
 
-    LEFT -->|多选勾选 / 拖拽卡片| ACT_DRAG
+    LEFT -->|多选勾选直接拖拽| ACT_DRAG
     RIGHT -->|双击单条| ACT_COPY
-    LEFT & RIGHT -.->|按空格键| ACT_PREV
+    LEFT -.->|按空格键| ACT_PREV
+    RIGHT -.->|按空格键| ACT_PREV
 
     RIGHT -.->|右键收藏| K
     P -.->|双击直达 / 拖拽| ACT_DRAG
@@ -108,7 +109,8 @@ graph TD
     end
 
     subgraph SELECT ["2. 极简自由勾选"]
-        L_COL & R_COL --> CHK["鼠标单击卡片空白区域<br/>点选勾选要发给对方的 1~N 项素材"]
+        L_COL --> CHK["鼠标单击卡片空白区域<br/>点选勾选要发给对方的 1~N 项素材"]
+        R_COL --> CHK
     end
 
     subgraph DRAG_ACTION ["3. 按住即拖，整包外带"]
@@ -178,14 +180,19 @@ graph TD
     ITEM["鼠标单击选中列表中任意卡片"] --> PRESS["轻轻敲击键盘空格键 (Space)"]
     PRESS --> BRANCH{"自动智能识别文件格式"}
 
-    BRANCH -->|高清截图 / 图片| V_IMG["📷 800x560 像素级超清大图<br/>底部显示原图分辨率、格式与物理大小"]
-    BRANCH -->|纯文本 / 代码| V_TXT["📝 15px 舒适大字号全文排版通读<br/>短文本自动收缩为 240px 紧凑窗，支持一键复制"]
-    BRANCH -->|Word 文档 (.docx)| V_DOC["📄 零依赖免装 Office<br/>自动提取通读全文段落结构与正文"]
-    BRANCH -->|Excel 表格 (.xlsx)| V_XLS["📊 原生解析网格数据<br/>免等 Office 启动，速览前几行前几列核心报表"]
-    BRANCH -->|PPT 幻灯片 (.pptx)| V_PPT["📽️ 逐页提取大纲标题与演讲正文大纲"]
+    BRANCH -->|高清截图与图片| V_IMG["📷 800x560 像素级超清大图<br/>底部显示原图分辨率、格式与物理大小"]
+    BRANCH -->|纯文本与代码| V_TXT["📝 15px 舒适大字号全文排版通读<br/>短文本自动收缩为 240px 紧凑窗，支持一键复制"]
+    BRANCH -->|Word 格式文档| V_DOC["📄 零依赖免装 Office<br/>自动提取通读全文段落结构与正文"]
+    BRANCH -->|Excel 电子表格| V_XLS["📊 原生解析网格数据<br/>免等 Office 启动，速览前几行前几列核心报表"]
+    BRANCH -->|PPT 演示幻灯片| V_PPT["📽️ 逐页提取大纲标题与演讲正文大纲"]
     BRANCH -->|系统文件夹| V_DIR["📁 展现金色大图标、文件统计与一键定位打开"]
 
-    V_IMG & V_TXT & V_DOC & V_XLS & V_PPT & V_DIR --> CLOSE["看完后再按一下 Space 或 Esc<br/>瞬时彻底关闭，内存对象完全销毁！"]
+    V_IMG --> CLOSE["看完后再按一下 Space 或 Esc<br/>瞬时彻底关闭，内存对象完全销毁！"]
+    V_TXT --> CLOSE
+    V_DOC --> CLOSE
+    V_XLS --> CLOSE
+    V_PPT --> CLOSE
+    V_DIR --> CLOSE
 
     style ITEM fill:#e8f5e9,stroke:#43a047,color:#000
     style PRESS fill:#e3f2fd,stroke:#1e88e5,color:#000
@@ -252,7 +259,7 @@ graph TD
 
     subgraph OBSIDIAN_SYNC ["3. 外部知识库双向联动"]
         CATEGORY -.-> OBS_LINK["设置面板中指定指令库路径为 Obsidian 笔记目录<br/>(例如 D:/MyVault/Prompts)"]
-        OBS_LINK <-->|两边修改实时热重载| OBS_VAULT["Obsidian 知识库<br/>双向打通，个人灵感无缝沉淀"]
+        OBS_LINK ---|双向修改实时热重载| OBS_VAULT["Obsidian 知识库<br/>双向打通，个人灵感无缝沉淀"]
     end
 
     style STORE_PROMPT fill:#e8f5e9,stroke:#43a047,color:#000
@@ -271,7 +278,7 @@ graph TD
 
 ```mermaid
 graph TD
-    FULL_WIN["完整大工作台界面 (460x640)"] -->|点击右上角折叠按钮 —| COLLAPSE["🪙 缩成 48x48 像素微型圆角小方块<br/>(面积仅原先 1/4，如一枚硬币大小)"]
+    FULL_WIN["完整大工作台界面 (460x640)"] -->|点击右上角折叠按钮| COLLAPSE["🪙 缩成 48x48 像素微型圆角小方块<br/>(面积仅原先 1/4，如一枚硬币大小)"]
 
     COLLAPSE --> MOVE["🖱️ 自由鼠标按住拖拽：<br/>随意拖到屏幕四角、任务栏上方或副屏贴边放着"]
     MOVE --> IDLE["☕ 极致克制静默常驻：<br/>不遮挡写代码、写文档或全屏游戏<br/>物理内存瞬间压缩至 4.16MB！"]
