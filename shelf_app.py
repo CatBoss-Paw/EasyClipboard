@@ -3981,11 +3981,23 @@ class Shelf(QWidget):
             if not os.path.exists(src):
                 continue
             real_src = os.path.realpath(src)
-            if any(e["kind"] == "file" and e.get("src") == real_src for e in self.entries):
+            # 1. 防自吞噬：暂存区目录自身内部的产物（截图cap_*.bmp、manifest等）绝不当作外部文件导入
+            try:
+                if os.path.commonpath([real_src, SHELF_REAL]) == SHELF_REAL:
+                    continue
+            except Exception:
+                pass
+            # 2. 查重：已收录的同路径外部文件跳过
+            if any(e.get("kind") == "file" and e.get("src") == real_src for e in self.entries):
                 continue
-            self._add_entry({"kind": "file", "name": os.path.basename(real_src),
+            # 3. 查重：若同名图片已在暂存区存在，跳过
+            base_n = os.path.basename(real_src)
+            if any(e.get("kind") == "image" and e.get("name") == base_n for e in self.entries):
+                continue
+            self._add_entry({"kind": "file", "name": base_n,
                              "src": real_src, "size": self._path_size(real_src),
                              "ts": datetime.now().strftime("%H:%M:%S")})
+
 
     def _add_entry(self, entry: dict):
         entry.setdefault("on", False)
@@ -4038,8 +4050,33 @@ class Shelf(QWidget):
         else:
             self.entries = []
         self._apply_retention()          # 保留策略：按设置清理过期条目（默认永不）
+
+        # 脏数据自愈：剔除把暂存区内截图/素材误当成外部文件收录的冗余条目
+        cleaned = []
+        dirty = False
+        img_names = {e.get("name") for e in self.entries if e.get("kind") == "image"}
+        for e in self.entries:
+            if e.get("kind") == "file":
+                src = e.get("src", "")
+                name = e.get("name", "")
+                # 如果指向暂存区内部，或者与现有截图重名，判定为环回拖拽产生的冗余脏数据
+                try:
+                    if src and os.path.commonpath([os.path.realpath(src), SHELF_REAL]) == SHELF_REAL:
+                        dirty = True
+                        continue
+                except Exception:
+                    pass
+                if name in img_names:
+                    dirty = True
+                    continue
+            cleaned.append(e)
+        if dirty:
+            self.entries = cleaned
+            self._persist_manifest()
+
         if self.entries and not p.exists():
             self._persist_manifest()
+
 
     def _apply_retention(self):
         """保留策略：auto_clear_hours=0 永不自动清除（手动清空为准）；
@@ -4737,15 +4774,39 @@ class Shelf(QWidget):
             self.pin_btn.setToolTip("当前未置顶 · 点击恢复置顶")
         self.pin_btn.setObjectName("pinBtn")
 
+    def _is_self_drag(self, ev) -> bool:
+        """判定拖拽源是否来自当前应用内部组件（防止放回自己时错误二次收录）"""
+        if getattr(self, "_drag_active", False):
+            return True
+        src = ev.source()
+        if src is not None:
+            if src is self or (hasattr(src, "window") and src.window() is self):
+                return True
+        return False
+
     def dragEnterEvent(self, ev):
+        if self._is_self_drag(ev):
+            ev.ignore()
+            return
+        if ev.mimeData().hasUrls():
+            ev.acceptProposedAction()
+
+    def dragMoveEvent(self, ev):
+        if self._is_self_drag(ev):
+            ev.ignore()
+            return
         if ev.mimeData().hasUrls():
             ev.acceptProposedAction()
 
     def dropEvent(self, ev):
+        if self._is_self_drag(ev):
+            ev.ignore()
+            return
         locals_ = [u.toLocalFile() for u in ev.mimeData().urls() if u.isLocalFile()]
         if locals_:
             self._ingest_files(locals_)
         ev.acceptProposedAction()
+
 
 
 # ------------------------------------------------------------------ 单实例保障

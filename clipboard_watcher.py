@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 轻松剪贴板 (EasyClipboard) — 内置剪贴板看护守护线程 (ClipboardWatcher)
@@ -329,9 +329,19 @@ class ClipboardWatcher(QObject):
 
         entries = self._load_manifest()
         last_added = None
+        shelf_real = os.path.realpath(self.shelf_dir)
         for src in files:
             real = os.path.realpath(src)
+            # 防自吞噬：暂存区目录自身内部的文件跳过
+            try:
+                if os.path.commonpath([real, shelf_real]) == shelf_real:
+                    continue
+            except Exception:
+                pass
             if any(e.get("kind") == "file" and e.get("src") == real for e in entries):
+                continue
+            base_n = os.path.basename(real)
+            if any(e.get("kind") == "image" and e.get("name") == base_n for e in entries):
                 continue
             size = 0
             if os.path.isfile(real):
@@ -345,13 +355,14 @@ class ClipboardWatcher(QObject):
                             pass
             entry = {
                 "kind": "file",
-                "name": os.path.basename(real),
+                "name": base_n,
                 "src": real,
                 "size": size,
                 "ts": datetime.now().strftime("%H:%M:%S")
             }
             entries.append(entry)
             last_added = entry
+
 
         if last_added:
             self._save_manifest(entries)
