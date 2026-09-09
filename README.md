@@ -16,6 +16,7 @@
   </p>
   <p align="center">
     <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(64bit)-0078D6?logo=windows&logoColor=white" alt="Platform"/>
+    <img src="https://img.shields.io/badge/macOS-In%20Progress%20(优化中)-lightgrey?logo=apple&logoColor=white" alt="macOS"/>
     <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python"/>
     <img src="https://img.shields.io/badge/GUI-PyQt6%20(Native%20Widgets)-41CD52?logo=qt&logoColor=white" alt="PyQt6"/>
     <img src="https://img.shields.io/badge/DPI-Hardware%20Aware%20V2-8A2BE2" alt="DPI Aware"/>
@@ -306,6 +307,10 @@ graph TD
 ---
 
 ## 📦 下载与安装
+
+> 💻 **操作系统支持情况**：
+> - ✅ **Windows 10 / 11 (64位)**：稳定可用，官方提供绿色免安装包，解压即用；
+> - 🍎 **macOS (Intel / Apple Silicon)**：**目前正在积极移植优化与测试中**，即将推出专用 `.app` 与 `.dmg` 安装包，敬请期待！
 
 ### 方式一：下载预构建绿色版（最推荐，零依赖解压即用）
 
