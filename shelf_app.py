@@ -844,7 +844,6 @@ class QuickPreviewPopup(QWidget):
         self.entry = entry
         self.shelf = parent_shelf
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setStyleSheet(parent_shelf.app_qss)
         self._build_ui()
 
@@ -1126,6 +1125,8 @@ class QuickPreviewPopup(QWidget):
 
     def closeEvent(self, ev):
         try:
+            if hasattr(self, "shelf") and getattr(self.shelf, "_preview_dlg", None) is self:
+                self.shelf._preview_dlg = None
             for child in self.findChildren(QLabel):
                 child.clear()
             for child in self.findChildren(QPlainTextEdit):
@@ -1133,6 +1134,7 @@ class QuickPreviewPopup(QWidget):
         except Exception:
             pass
         super().closeEvent(ev)
+        self.deleteLater()
         trim_working_set()
 
 
@@ -4131,15 +4133,19 @@ class Shelf(QWidget):
             self.entries = []
         self._apply_retention()          # 保留策略：按设置清理过期条目（默认永不）
 
-        # 脏数据自愈：剔除把暂存区内截图/素材误当成外部文件收录的冗余条目
+        # 脏数据自愈：
+        # 1. 剔除把暂存区内截图/素材误当成外部文件收录的冗余条目
+        # 2. 剔除内容完全一致的重复截图（只保留最新一条），根治历史疯狂叠加脏数据
         cleaned = []
         dirty = False
+        seen_img_hashes = set()
         img_names = {e.get("name") for e in self.entries if e.get("kind") == "image"}
-        for e in self.entries:
-            if e.get("kind") == "file":
+
+        for e in reversed(self.entries):
+            k = e.get("kind")
+            if k == "file":
                 src = e.get("src", "")
                 name = e.get("name", "")
-                # 如果指向暂存区内部，或者与现有截图重名，判定为环回拖拽产生的冗余脏数据
                 try:
                     if src and os.path.commonpath([os.path.realpath(src), SHELF_REAL]) == SHELF_REAL:
                         dirty = True
@@ -4149,7 +4155,27 @@ class Shelf(QWidget):
                 if name in img_names:
                     dirty = True
                     continue
-            cleaned.append(e)
+                cleaned.append(e)
+            elif k == "image":
+                h = e.get("hash")
+                if not h:
+                    try:
+                        p_img = self._entry_path(e["name"])
+                        if os.path.exists(p_img):
+                            h = hashlib.sha1(Path(p_img).read_bytes()).hexdigest()
+                            e["hash"] = h
+                    except Exception:
+                        pass
+                if h and h in seen_img_hashes:
+                    dirty = True
+                    continue
+                if h:
+                    seen_img_hashes.add(h)
+                cleaned.append(e)
+            else:
+                cleaned.append(e)
+
+        cleaned.reverse()
         if dirty:
             self.entries = cleaned
             self._persist_manifest()
@@ -4279,10 +4305,15 @@ class Shelf(QWidget):
         - 再次取当前已勾选的第一项
         - 最后取素材列表的第一项
         """
-        if self._preview_dlg is not None and self._preview_dlg.isVisible():
-            self._preview_dlg.close()
-            self._preview_dlg = None
-            return
+        dlg = getattr(self, "_preview_dlg", None)
+        if dlg is not None:
+            try:
+                if dlg.isVisible():
+                    self._preview_dlg = None
+                    dlg.close()
+                    return
+            except (RuntimeError, Exception):
+                self._preview_dlg = None
 
         entry = getattr(self, "_hovered_entry", None) or getattr(self, "_selected_entry", None)
         if not entry:
@@ -4298,17 +4329,30 @@ class Shelf(QWidget):
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Space:
+            if ev.isAutoRepeat():
+                ev.accept()
+                return
             self._trigger_space_preview()
             ev.accept()
             return
         super().keyPressEvent(ev)
 
     def show_quick_preview(self, entry: dict):
-        if self._preview_dlg is not None:
-            self._preview_dlg.close()
+        if getattr(self, "_preview_dlg", None) is not None:
+            try:
+                self._preview_dlg.close()
+            except Exception:
+                pass
             self._preview_dlg = None
-        self._preview_dlg = QuickPreviewPopup(entry, self)
-        self._preview_dlg.show()
+        try:
+            self._preview_dlg = QuickPreviewPopup(entry, self)
+            self._preview_dlg.show()
+            self._preview_dlg.raise_()
+            self._preview_dlg.activateWindow()
+        except Exception:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            self._preview_dlg = None
 
     def copy_single_entry(self, entry: dict):
         mime = QMimeData()
@@ -4754,6 +4798,8 @@ class Shelf(QWidget):
     def _write_own_clipboard(self, mime, signature):
         self._suppress_sig = signature
         self._suppress_until = time.time() + 1.5
+        if hasattr(self, "watcher") and self.watcher:
+            self.watcher.suppress(1.5)
         QGuiApplication.clipboard().setMimeData(mime)
 
     def open_shelf_dir(self):

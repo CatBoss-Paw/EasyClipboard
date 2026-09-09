@@ -91,8 +91,13 @@ class ClipboardWatcher(QObject):
         self._pending_text = None
         self._last_dib_sha1 = None
         self._last_files = None
+        self._suppress_until = 0.0
 
         self._ensure_dirs()
+
+    def suppress(self, seconds: float = 1.5):
+        """主程序操作剪贴板时调用，使看护器在指定秒数内完全静默，彻底根除自吞噬死循环"""
+        self._suppress_until = max(self._suppress_until, time.time() + seconds)
 
     def _ensure_dirs(self):
         try:
@@ -307,13 +312,30 @@ class ClipboardWatcher(QObject):
             return
 
         ts = datetime.now()
+        entries = self._load_manifest()
+
+        # 【核心查重与MRU置顶】如果历史已有相同哈希的截图，绝不重复写文件，直接置顶！
+        for i, e in enumerate(entries):
+            if e.get("kind") == "image" and e.get("hash") == hsha:
+                target_entry = entries.pop(i)
+                target_entry["ts"] = ts.strftime("%H:%M:%S")
+                entries.append(target_entry)
+                self._save_manifest(entries)
+                self.entry_captured.emit(target_entry)
+                return
+
         name = f"cap_{ts:%Y%m%d_%H%M%S}.bmp"
         dst = self._unique_dest(name)
         bf = struct.pack("<2sIHHI", b"BM", 14 + len(dib), 0, 0, 14 + header_size)
         dst.write_bytes(bf + dib)
 
-        entry = {"kind": "image", "name": dst.name, "ts": ts.strftime("%H:%M:%S")}
-        entries = self._load_manifest()
+        entry = {
+            "kind": "image",
+            "name": dst.name,
+            "hash": hsha,
+            "size": len(bf) + len(dib),
+            "ts": ts.strftime("%H:%M:%S")
+        }
         entries.append(entry)
         self._save_manifest(entries)
         self.entry_captured.emit(entry)
@@ -363,7 +385,6 @@ class ClipboardWatcher(QObject):
             entries.append(entry)
             last_added = entry
 
-
         if last_added:
             self._save_manifest(entries)
             self.entry_captured.emit(last_added)
@@ -373,6 +394,10 @@ class ClipboardWatcher(QObject):
             time.sleep(0.35)
             try:
                 self._flush_due_pending()
+                # 防自吞噬：主程序正在执行复制/拖拽操作时，看护器完全静默
+                if time.time() < self._suppress_until:
+                    continue
+
                 seq = user32.GetClipboardSequenceNumber()
                 if seq == self._last_seq:
                     continue
@@ -383,14 +408,24 @@ class ClipboardWatcher(QObject):
 
                 if user32.OpenClipboard(None):
                     try:
-                        if user32.IsClipboardFormatAvailable(CF_DIB):
-                            self._commit_pending_text()
-                            self._capture_dib()
-                        elif user32.IsClipboardFormatAvailable(CF_HDROP):
+                        has_dib = user32.IsClipboardFormatAvailable(CF_DIB)
+                        has_files = user32.IsClipboardFormatAvailable(CF_HDROP)
+                        has_text = user32.IsClipboardFormatAvailable(CF_UNICODETEXT)
+
+                        # 如果是文件复制，优先按文件处理
+                        if has_files:
                             self._commit_pending_text()
                             self._capture_files()
-                        elif user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+                        # 如果是纯截图（通常只有 DIB 或伴随少量非文字格式）
+                        elif has_dib and not has_text:
+                            self._commit_pending_text()
+                            self._capture_dib()
+                        # 如果有文字（或者是图文混合），优先摄取文本内容
+                        elif has_text:
                             self._capture_text()
+                        elif has_dib:
+                            self._commit_pending_text()
+                            self._capture_dib()
                     finally:
                         user32.CloseClipboard()
             except Exception:
