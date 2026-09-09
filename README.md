@@ -47,33 +47,85 @@
 > **你在电脑上平时怎么复制，还怎么复制 → 软件在后台自动帮你分门别类存好 → 需要用时一按一拖，轻松搞定！**
 
 ```mermaid
-graph LR
-    A["平时照常复制/截图<br/>(Ctrl+C 或 截图)"] --> B["自动分门别类存好<br/>(左边放图和文件，右边放文字)"]
-    B --> C["批量勾选随手一拖<br/>(聊天软件/网页上传/邮件附件)"]
-    B --> D["按空格键秒预览<br/>(大图/Word/Excel免装Office直接看)"]
-    B --> E["永久写进今日日记<br/>(今天复制过的文字永不丢失)"]
+graph TB
+    subgraph S_INPUT ["🖥️ 用户日常高频操作"]
+        A1["Ctrl+C 复制文字 / 链接"]
+        A2["快捷键截取图片"]
+        A3["Ctrl+C 复制本地文件 / 文件夹"]
+    end
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style C fill:#fce4ec,stroke:#e53935,color:#000
-    style D fill:#fff8e1,stroke:#f9a825,color:#000
-    style E fill:#fff3e0,stroke:#ef6c00,color:#000
+    subgraph S_CORE ["🕵️ 极轻后台看守进程 (watchdog.pyw)"]
+        W["常驻无Qt微内核<br/>内存仅 28MB · CPU 0% · 毫秒级原生监听"]
+    end
+
+    subgraph S_SHELF ["📋 双轨协同工作台 (shelf_app.py)"]
+        LEFT["📂 左栏：文件与图片区<br/>高清截图 / Office / 压缩包 / 文件夹"]
+        RIGHT["📝 右栏：文字碎片区<br/>纯文本 / 智能识链 🔗 / 代码片段"]
+    end
+
+    subgraph S_ACTION ["⚡ 极速交付与联动"]
+        ACT_DRAG["📦 整包拖拽外发<br/>勾选多项，直接拖动任意卡片整包带走<br/>直达各类聊天软件(IM) / 网页上传区 / 邮件"]
+        ACT_COPY["⚡ 双击秒级复制<br/>即刻返回剪贴板，切回文档直接粘贴"]
+        ACT_PREV["🔍 Space 空格极速大预览<br/>免装 Office 通读 Word / Excel / PPT / 高清大图"]
+    end
+
+    subgraph S_PERSIST ["💾 永久持久化存储 (本地明文 Markdown)"]
+        J["📓 每日工作日记 (_History/YYYY-MM-DD.md)<br/>后台静默追加，误触覆盖永不丢失"]
+        P["⭐ 快速访问区 (_Pinned/)<br/>高频目录永久置顶，一键直通与外发"]
+        K["🧠 快速指令库 (_Prompts/)<br/>AI 提示词/话术分门别类，可联动挂载 Obsidian"]
+    end
+
+    A1 --> W
+    A2 --> W
+    A3 --> W
+
+    W -->|自动归入分流| LEFT
+    W -->|自动归入分流| RIGHT
+    W -->|后台时间戳追加| J
+
+    LEFT -->|多选勾选 / 拖拽卡片| ACT_DRAG
+    RIGHT -->|双击单条| ACT_COPY
+    LEFT & RIGHT -.->|按空格键| ACT_PREV
+
+    RIGHT -.->|右键收藏| K
+    P -.->|双击直达 / 拖拽| ACT_DRAG
+
+    style S_CORE fill:#f1f8e9,stroke:#558b2f,color:#000
+    style S_SHELF fill:#e3f2fd,stroke:#1565c0,color:#000
+    style S_ACTION fill:#fce4ec,stroke:#c2185b,color:#000
+    style S_PERSIST fill:#fff8e1,stroke:#f57f17,color:#000
 ```
 
 ---
 
-### 🍱 本领 1：左右自动分门别类，像吃自助餐一样“一键打包外带”
+### 🍱 本领 1：左右自动分门别类，多选随心“一键整包拖走”
 
 ```mermaid
-graph LR
-    A["复制了多张截图、文件与文字"] --> B["左右自动归类清爽排好"]
-    B -->|鼠标点选勾选所需卡片| C["直接按住任意一张卡片往外拖"]
-    C -->|一拖全带走| D["甩进聊天软件(IM)或网页上传区<br/>(告别来回反复切换窗口！)"]
+graph TD
+    subgraph INGEST ["1. 智能捕获与分轨"]
+        IN1["截图 / 文件 / 文件夹"] --> L_COL["📂 归入左栏：图片与文件卡片"]
+        IN2["文字短语 / 网址链接"] --> R_COL["📝 归入右栏：文字碎片卡片 (自动识别 🔗)"]
+    end
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style C fill:#fff8e1,stroke:#f9a825,color:#000
-    style D fill:#fce4ec,stroke:#e53935,color:#000
+    subgraph SELECT ["2. 极简自由勾选"]
+        L_COL & R_COL --> CHK["鼠标单击卡片空白区域<br/>点选勾选要发给对方的 1~N 项素材"]
+    end
+
+    subgraph DRAG_ACTION ["3. 按住即拖，整包外带"]
+        CHK --> DRAG_START["无需任何多余步骤！<br/>直接按住选中的任意一张卡片往外拖拽"]
+        DRAG_START --> DROP_ZONE["甩进目标区域松手释放"]
+    end
+
+    subgraph TARGETS ["4. 全场景无缝交付"]
+        DROP_ZONE --> T1["💬 各类聊天软件 (IM)<br/>微信 / QQ / 飞书 / 钉钉 / 企业微信等"]
+        DROP_ZONE --> T2["🌐 浏览器网页上传区<br/>各类业务系统表单 / 在线网盘 / 邮箱附件栏"]
+        DROP_ZONE --> T3["📁 本地文件夹 / 外部编辑器<br/>桌面、指定项目目录、Markdown 笔记"]
+    end
+
+    style INGEST fill:#e8f5e9,stroke:#43a047,color:#000
+    style SELECT fill:#e3f2fd,stroke:#1e88e5,color:#000
+    style DRAG_ACTION fill:#fff8e1,stroke:#f9a825,color:#000
+    style TARGETS fill:#fce4ec,stroke:#e53935,color:#000
 ```
 
 - **你在任何软件里按 `Ctrl+C` 或截图**，不用任何多余操作：
@@ -89,17 +141,25 @@ graph LR
 ### ⭐ 本领 2：常用文件夹 & 核心报表“一键固定直达”（快速访问区）
 
 ```mermaid
-graph LR
-    A["每天高频使用的<br/>工作目录 / 核心报表 / 合同模板"] -->|点「加文件夹」或拖拽加入| B["⭐ 永久固定在快速访问区"]
-    B -->|双击条目| C["一秒直达打开目录或文件"]
-    B -->|直接拖拽| D["甩进聊天软件(IM)或网站上传框"]
-    B -->|一键清理临时素材| E["快速访问区永久保护，绝不被清空"]
+graph TD
+    subgraph PIN_IN ["1. 资产收藏固定"]
+        SRC["每天都要用的：<br/>工作文件夹 / 核心报表 / 合同模板 / 工程目录"] --> ADD_ACT["点击「加文件夹 / 加文件」<br/>或直接把文件从桌面拖进快速访问区"]
+        ADD_ACT --> PIN_LIST["⭐ 永久常驻在侧边快速访问列表"]
+    end
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#fff8e1,stroke:#f9a825,color:#000
-    style C fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style D fill:#e8f5e9,stroke:#43a047,color:#000
-    style E fill:#fce4ec,stroke:#e53935,color:#000
+    subgraph PIN_USE ["2. 高效日常使用"]
+        PIN_LIST -->|双击条目| OP1["⚡ 一秒直通打开：<br/>文件夹直接在资源管理器/访达中展开<br/>文件直接调用默认软件打开"]
+        PIN_LIST -->|按住拖出| OP2["📦 随手一拖发送：<br/>直接甩入各类聊天软件(IM)或网页上传区"]
+        PIN_LIST -->|键盘快捷键| OP3["⌨️ 支持原生快捷操作：<br/>Ctrl+C 复制路径、Delete 移除固定"]
+    end
+
+    subgraph PIN_SAFE ["3. 安全隔离防护"]
+        CLEAN["点击清空临时剪贴板素材"] -.-> SHIELD["🛡️ 快速访问区独立存储于 _Pinned/<br/>受物理隔离保护，素材绝不丢失！"]
+    end
+
+    style PIN_IN fill:#e8f5e9,stroke:#43a047,color:#000
+    style PIN_USE fill:#e3f2fd,stroke:#1e88e5,color:#000
+    style PIN_SAFE fill:#fff3e0,stroke:#ef6c00,color:#000
 ```
 
 - 你的电脑里一定有几个每天都要打开的文件夹或 Excel 表格，以往总要在“我的电脑”里一层一层点开，费时费力；
@@ -111,20 +171,26 @@ graph LR
 
 ---
 
-### 🔍 本领 3：按一下键盘空格键，不用等 Office 也能秒看文件内容
+### 🔍 本领 3：按一下键盘空格键（Space），不用等 Office 也能秒看文件内容
 
 ```mermaid
-graph LR
-    A["列表里任意文件 / 图片"] -->|按一下键盘空格键 (Space)| B["🔍 宽敞高清大预览窗口"]
-    B -->|图片 / 文本| C["看 800x560 超清大图 / 15px大字通读长文"]
-    B -->|Word / Excel / PPT| D["免装 Office，直接提炼段落与表格大纲"]
-    B -->|看完再按一下空格| E["瞬时关闭，完全不占电脑内存"]
+graph TD
+    ITEM["鼠标单击选中列表中任意卡片"] --> PRESS["轻轻敲击键盘空格键 (Space)"]
+    PRESS --> BRANCH{"自动智能识别文件格式"}
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style C fill:#fff8e1,stroke:#f9a825,color:#000
-    style D fill:#e8f5e9,stroke:#43a047,color:#000
-    style E fill:#fce4ec,stroke:#e53935,color:#000
+    BRANCH -->|高清截图 / 图片| V_IMG["📷 800x560 像素级超清大图<br/>底部显示原图分辨率、格式与物理大小"]
+    BRANCH -->|纯文本 / 代码| V_TXT["📝 15px 舒适大字号全文排版通读<br/>短文本自动收缩为 240px 紧凑窗，支持一键复制"]
+    BRANCH -->|Word 文档 (.docx)| V_DOC["📄 零依赖免装 Office<br/>自动提取通读全文段落结构与正文"]
+    BRANCH -->|Excel 表格 (.xlsx)| V_XLS["📊 原生解析网格数据<br/>免等 Office 启动，速览前几行前几列核心报表"]
+    BRANCH -->|PPT 幻灯片 (.pptx)| V_PPT["📽️ 逐页提取大纲标题与演讲正文大纲"]
+    BRANCH -->|系统文件夹| V_DIR["📁 展现金色大图标、文件统计与一键定位打开"]
+
+    V_IMG & V_TXT & V_DOC & V_XLS & V_PPT & V_DIR --> CLOSE["看完后再按一下 Space 或 Esc<br/>瞬时彻底关闭，内存对象完全销毁！"]
+
+    style ITEM fill:#e8f5e9,stroke:#43a047,color:#000
+    style PRESS fill:#e3f2fd,stroke:#1e88e5,color:#000
+    style BRANCH fill:#fff8e1,stroke:#f9a825,color:#000
+    style CLOSE fill:#fce4ec,stroke:#e53935,color:#000
 ```
 
 - 列表中素材多了，光看文件名不知道具体写了啥？双击打开 Word/Excel 又要等好几秒？
@@ -142,15 +208,25 @@ graph LR
 ### 📖 本领 4：默默为你写一整天的工作日记，文字永不丢失
 
 ```mermaid
-graph LR
-    A["你今天复制过的每一段文字 / 电话 / 灵感"] -->|看守进程后台自动留痕| B["📓 今日专属日记文件<br/>(_History/YYYY-MM-DD.md)"]
-    B -->|不小心误覆盖？| C["历史永远在，随时翻看找回"]
-    B -->|整天没开软件？| D["后台依然默默全记下"]
+graph TD
+    subgraph CAPTURE ["1. 全天候静默捕获"]
+        C1["复制客户电话 / 邮件纪要"] --> BG["🕵️ 后台看守进程 (watchdog.pyw)<br/>常驻 28MB，即使没开主界面也在全天值班"]
+        C2["复制重要代码 / 策划方案"] --> BG
+    end
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#fff3e0,stroke:#ef6c00,color:#000
-    style C fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style D fill:#fce4ec,stroke:#e53935,color:#000
+    subgraph JOURNAL_FILE ["2. 本地明文 Markdown 留痕"]
+        BG --> APPEND["按毫秒时间戳自动追加写入：<br/>_History/YYYY-MM-DD.md 专属日记文件"]
+    end
+
+    subgraph RECOVERY ["3. 历史翻看与防手滑找回"]
+        APPEND --> VIEW1["📖 应用内时光长廊：<br/>点击顶栏「今日日志」翻看，安全上限渲染最新 80 条"]
+        APPEND --> VIEW2["📝 外部文本编辑器：<br/>随时用记事本、VS Code、Obsidian 打开检索"]
+        APPEND --> VIEW3["🛡️ 防手滑误覆盖保护：<br/>刚复制的大段文本被不小心顶掉？历史永远在！"]
+    end
+
+    style CAPTURE fill:#e8f5e9,stroke:#43a047,color:#000
+    style JOURNAL_FILE fill:#fff3e0,stroke:#ef6c00,color:#000
+    style RECOVERY fill:#e3f2fd,stroke:#1e88e5,color:#000
 ```
 
 - 你一定经历过这种崩溃：精心整理好的一大段关键纪要刚按了复制，下一秒手滑又复制了别的东西，**刚才的内容就永远丢了**；
@@ -164,15 +240,24 @@ graph LR
 ### ⚡ 本领 5：常用话术 & AI 提示词随身小口袋（支持连通 Obsidian）
 
 ```mermaid
-graph LR
-    A["看到好用的提示词 / 客服话术 / 代码"] -->|右键「加入快速指令」| B["⚡ 按分类存入本地 Markdown"]
-    B -->|下次要用时| C["双击直接复制好，切回文档直接粘贴"]
-    B -->|如果你用 Obsidian| D["设置里指定路径，两边实时双向同步"]
+graph TD
+    subgraph STORE_PROMPT ["1. 一秒收纳高频文本"]
+        RAW["看到精彩的 AI 提示词 / 客服话术 / 常用代码"] --> SAVE_ACT["右键卡片选择「加入快速指令」<br/>或在每日日志中点击 ⚡ 按钮"]
+        SAVE_ACT --> CATEGORY["选择或新建分类目录，存为独立 .md 纯文本文件"]
+    end
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#f3e5f5,stroke:#8e24aa,color:#000
-    style C fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style D fill:#fff8e1,stroke:#f9a825,color:#000
+    subgraph USE_PROMPT ["2. 即取即用"]
+        CATEGORY --> CALL_ACT["点击顶栏「快速指令」切换到提示词库<br/>双击卡片瞬间复制好，切回原窗口直接 Ctrl+V 粘贴"]
+    end
+
+    subgraph OBSIDIAN_SYNC ["3. 外部知识库双向联动"]
+        CATEGORY -.-> OBS_LINK["设置面板中指定指令库路径为 Obsidian 笔记目录<br/>(例如 D:/MyVault/Prompts)"]
+        OBS_LINK <-->|两边修改实时热重载| OBS_VAULT["Obsidian 知识库<br/>双向打通，个人灵感无缝沉淀"]
+    end
+
+    style STORE_PROMPT fill:#e8f5e9,stroke:#43a047,color:#000
+    style USE_PROMPT fill:#e3f2fd,stroke:#1e88e5,color:#000
+    style OBSIDIAN_SYNC fill:#f3e5f5,stroke:#8e24aa,color:#000
 ```
 
 - 工作中总有反复使用的文本：常用邮件模板、客服话术、ChatGPT / 绘图提示词、常用代码……
@@ -185,15 +270,18 @@ graph LR
 ### 🪙 本领 6：像硬币一样小巧，贴在桌面角落完全不挡视线
 
 ```mermaid
-graph LR
-    A["觉得主窗口挡屏幕？"] -->|点击右上角折叠按钮 —| B["🪙 缩成 48x48 微型小方块"]
-    B -->|鼠标按住| C["随便拖到屏幕角落贴边放着"]
-    B -->|需要用时点一下| D["毫秒级丝滑恢复为完整大窗口"]
+graph TD
+    FULL_WIN["完整大工作台界面 (460x640)"] -->|点击右上角折叠按钮 —| COLLAPSE["🪙 缩成 48x48 像素微型圆角小方块<br/>(面积仅原先 1/4，如一枚硬币大小)"]
 
-    style A fill:#e8f5e9,stroke:#43a047,color:#000
-    style B fill:#fff8e1,stroke:#f9a825,color:#000
-    style C fill:#e3f2fd,stroke:#1e88e5,color:#000
-    style D fill:#fce4ec,stroke:#e53935,color:#000
+    COLLAPSE --> MOVE["🖱️ 自由鼠标按住拖拽：<br/>随意拖到屏幕四角、任务栏上方或副屏贴边放着"]
+    MOVE --> IDLE["☕ 极致克制静默常驻：<br/>不遮挡写代码、写文档或全屏游戏<br/>物理内存瞬间压缩至 4.16MB！"]
+
+    IDLE -->|需要用时单击一下小方块| EXPAND["✨ 毫秒级平滑恢复完整大工作台！"]
+
+    style FULL_WIN fill:#e3f2fd,stroke:#1e88e5,color:#000
+    style COLLAPSE fill:#fff8e1,stroke:#f9a825,color:#000
+    style IDLE fill:#f1f8e9,stroke:#558b2f,color:#000
+    style EXPAND fill:#fce4ec,stroke:#e53935,color:#000
 ```
 
 - 觉得主窗口占屏幕？
