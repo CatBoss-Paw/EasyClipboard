@@ -44,7 +44,6 @@ Desktop.ini
 .DS_Store
 
 # ========== 项目辅助（非核心，不入仓库） ==========
-.github/
 .lingxi/
 .mimosa/
 .rundata/

@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QPointF, QRectF, QSize, QSizeF
 from PyQt6.QtGui import (QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap,
                          QPolygonF)
 
-_LINE = 1.5          # 线宽（逻辑像素）
+_LINE = 2.0          # 线宽（逻辑像素，扎实清晰，高分屏不发虚）
 S = 16.0             # 画布边长
 
 
@@ -194,6 +194,20 @@ def draw_text(p: QPainter) -> None:
     _line(p, 4.0, 11.4, 9.6, 11.4)
 
 
+def draw_link(p: QPainter) -> None:
+    path = QPainterPath(QPointF(6.8, 9.2))
+    path.lineTo(5.0, 11.0)
+    path.cubicTo(3.4, 12.6, 1.4, 10.6, 3.0, 9.0)
+    path.lineTo(4.8, 7.2)
+    p.drawPath(path)
+    path2 = QPainterPath(QPointF(9.2, 6.8))
+    path2.lineTo(11.0, 5.0)
+    path2.cubicTo(12.6, 3.4, 10.6, 1.4, 9.0, 3.0)
+    path2.lineTo(7.2, 4.8)
+    p.drawPath(path2)
+    _line(p, 5.5, 10.5, 10.5, 5.5)
+
+
 DRAWERS = {
     "scissors": draw_scissors, "pin": draw_pin, "gear": draw_gear,
     "help": draw_help, "star": draw_star, "doc": draw_doc,
@@ -201,7 +215,7 @@ DRAWERS = {
     "copy": draw_copy, "plus": draw_plus, "back": draw_back,
     "edit": draw_edit, "image": draw_image, "check": draw_check,
     "minus": draw_minus, "close": draw_close, "attach": draw_attach,
-    "text": draw_text, "refresh": draw_refresh,
+    "text": draw_text, "link": draw_link, "refresh": draw_refresh,
 }
 
 

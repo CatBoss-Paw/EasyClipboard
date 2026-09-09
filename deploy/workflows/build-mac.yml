@@ -1,0 +1,58 @@
+name: Build macOS Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: # 允许在 GitHub Actions 网页端随时手动一键触发测试打包！
+
+jobs:
+  build-macos:
+    name: Build macOS Universal App
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build macOS App with PyInstaller
+        run: |
+          pyinstaller --noconfirm --windowed --name "EasyClipboard" \
+            --hidden-import=keyboard \
+            --hidden-import=prompts_store \
+            --hidden-import=icons \
+            shelf_app.py
+
+      - name: Compress App to ZIP
+        run: |
+          cd dist
+          zip -r -y "EasyClipboard-macos-universal.zip" "EasyClipboard.app"
+          echo "macOS ZIP 打包完成："
+          ls -lh EasyClipboard-macos-universal.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EasyClipboard-macos-universal
+          path: dist/EasyClipboard-macos-universal.zip
+
+      - name: Upload macOS Asset to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'release'
+        with:
+          files: dist/EasyClipboard-macos-universal.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

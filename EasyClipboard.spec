@@ -88,7 +88,7 @@ ui_analysis = Analysis(
     ["shelf_app.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('assets', 'assets')],
     hiddenimports=["keyboard", "prompts_store", "icons"],
     hookspath=[],
     runtime_hooks=[],
@@ -109,7 +109,7 @@ ui_exe = EXE(
     strip=False,
     upx=False,                     # UPX 压缩会显著提高杀软误报率，禁用
     console=False,                 # 无控制台窗口
-    icon=None,                     # 后续可挂 .ico
+    icon='assets/app.ico',         # 挂载全新官方高清定制图标
 )
 
 # ------------------------------------------------------------------ 看守进程
@@ -141,7 +141,7 @@ wd_exe = EXE(
     strip=False,
     upx=False,
     console=False,                 # 常驻进程绝不能弹控制台窗口
-    icon=None,
+    icon='assets/app.ico',
 )
 
 # ------------------------------------------------------------------ 合并到一个目录

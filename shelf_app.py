@@ -26,19 +26,30 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import (Qt, QRect, QPoint, QUrl, QByteArray, QBuffer,
-                          QIODevice, QMimeData, QTimer, pyqtSignal, QEvent, QSize)
+                          QIODevice, QMimeData, QTimer, pyqtSignal, QEvent, QSize,
+                          QFileInfo)
 from prompts_store import PromptsStore
 from icons import icon as _icon
 from PyQt6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QFont,
                           QDrag, QIcon, QAction, QKeySequence,
-                          QShortcut, QLinearGradient, QPainterPath)
+                          QShortcut, QLinearGradient, QPainterPath,
+                          QImageReader, QPixmapCache)
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
                               QVBoxLayout, QHBoxLayout, QScrollArea,
                               QFrame, QSystemTrayIcon, QMenu, QMessageBox,
                               QDialog, QFileDialog, QSlider, QCheckBox,
                               QPlainTextEdit, QListWidget, QListWidgetItem,
                               QStackedWidget, QLineEdit, QSizeGrip,
-                              QInputDialog, QComboBox)
+                              QInputDialog, QComboBox, QFileIconProvider,
+                              QTextBrowser, QSizePolicy)
+
+_FILE_ICON_PROVIDER = None
+
+def _get_icon_provider() -> QFileIconProvider:
+    global _FILE_ICON_PROVIDER
+    if _FILE_ICON_PROVIDER is None:
+        _FILE_ICON_PROVIDER = QFileIconProvider()
+    return _FILE_ICON_PROVIDER
 
 # ------------------------------------------------------------------ 配置与常量
 def _resolve_app_dir() -> Path:
@@ -138,12 +149,32 @@ TOAST_DURATION_MS = 2200
 
 
 def trim_working_set() -> None:
-    """触发垃圾回收并请求 Windows 回收当前进程的空闲工作集物理页。"""
+    """跨代垃圾回收、清理 Qt 位图缓存，并调用 Windows 原生 EmptyWorkingSet 收缩物理内存。"""
     try:
         gc.collect()
+        try:
+            QPixmapCache.clear()
+        except Exception:
+            pass
         if sys.platform == "win32":
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            h_proc = k32.GetCurrentProcess()
+            try:
+                psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+                psapi.EmptyWorkingSet.restype = wintypes.BOOL
+                psapi.EmptyWorkingSet(h_proc)
+            except Exception:
+                pass
+            try:
+                k32.SetProcessWorkingSetSize.argtypes = [wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t]
+                k32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+                c_neg = ctypes.c_size_t(-1).value
+                k32.SetProcessWorkingSetSize(h_proc, c_neg, c_neg)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -162,7 +193,7 @@ DEFAULT_SETTINGS = {
     "pinned_dir": str(APP_DIR / "_Pinned"),
     "prompts_dir": str(APP_DIR / "_Prompts"),
     "min_text_len": 2,        # 文字最短收录长度：低于此值的碎片不入架不写日志
-    "auto_clear_hours": 0,    # 素材保留策略：0=永不自动清除；24/72/168=按节点自动清理
+    "auto_clear_hours": 168,  # 素材保留策略：默认保留 7 天（168 小时）
     "hotkey": "f9",           # 全局呼出热键，设置面板可改
     "autostart": False,       # 开机自启
 }
@@ -185,14 +216,16 @@ PALETTES = {
     "dark": {
         "bg": "#1c1c1e", "bg_alpha": 222, "bg_solid": "#1c1c1e",
         "border": "#3a3a3c",
-        "title": "#f5f5f7", "meta": "#98989d", "subtext": "#aeaeb2",
+        "title": "#f5f5f7", "meta": "#a1a1aa", "subtext": "#d4d4d8",
+        "col_header": "#e2e8f0",    # 栏目标题高亮亮白
+        "icon": "#e2e8f0",          # 高明度亮白灰图标（黑底下晶莹清晰）
         "card": "#2c2c2e", "card_border": "#3a3a3c",
         "card_hover": "#363638", "card_hover_border": "#48484a",
         "btn": "#3a3a3c", "btn_hover": "#48484a", "btn_text": "#e5e5ea",
         "btn_primary": "#0A84FF", "btn_primary_hover": "#409CFF",
-        "count_bg": "#3a3a3c", "count_text": "#aeaeb2",
-        "empty_icon": "#48484a", "empty_title": "#98989d", "empty_hint": "#6e6e73",
-        "scroll": "#48484a", "scroll_hover": "#6e6e73",
+        "count_bg": "#3a3a3c", "count_text": "#f4f4f5",
+        "empty_icon": "#48484a", "empty_title": "#a1a1aa", "empty_hint": "#71717a",
+        "scroll": "#48484a", "scroll_hover": "#71717a",
         "action_btn": "#3a3a3c", "action_btn_hover": "#48484a",
         "divider": "#38383a",
         "preview_bg": "#262628",
@@ -202,17 +235,19 @@ PALETTES = {
     },
     "light": {
         "bg": "#f5f5f7", "bg_alpha": 226, "bg_solid": "#f5f5f7",
-        "border": "#d2d2d7",
-        "title": "#1d1d1f", "meta": "#86868b", "subtext": "#6e6e73",
-        "card": "#ffffff", "card_border": "#e8e8ed",
-        "card_hover": "#f5f5f7", "card_hover_border": "#d2d2d7",
-        "btn": "#e8e8ed", "btn_hover": "#dcdce0", "btn_text": "#1d1d1f",
+        "border": "#cbd5e1",
+        "title": "#0f172a", "meta": "#475569", "subtext": "#1e293b",
+        "col_header": "#1e293b",    # 栏目标题深色高对比度，彻底告别发虚
+        "icon": "#1e293b",          # 高对比度深石墨灰图标（浅底上极度清晰醒目）
+        "card": "#ffffff", "card_border": "#cbd5e1",
+        "card_hover": "#f8fafc", "card_hover_border": "#94a3b8",
+        "btn": "#e2e8f0", "btn_hover": "#cbd5e1", "btn_text": "#0f172a",
         "btn_primary": "#007AFF", "btn_primary_hover": "#0059C8",
-        "count_bg": "#e8e8ed", "count_text": "#86868b",
-        "empty_icon": "#d2d2d7", "empty_title": "#86868b", "empty_hint": "#aeaeb2",
-        "scroll": "#d2d2d7", "scroll_hover": "#aeaeb2",
-        "action_btn": "#e8e8ed", "action_btn_hover": "#dcdce0",
-        "divider": "#e8e8ed",
+        "count_bg": "#e2e8f0", "count_text": "#0f172a", # 计数胶囊深沉清晰
+        "empty_icon": "#cbd5e1", "empty_title": "#475569", "empty_hint": "#64748b",
+        "scroll": "#cbd5e1", "scroll_hover": "#94a3b8",
+        "action_btn": "#e2e8f0", "action_btn_hover": "#cbd5e1",
+        "divider": "#cbd5e1",
         "preview_bg": "#ffffff",
         "danger": "#FF3B30", "danger_bg": "#fdeceb",
         "input_bg": "#ffffff",
@@ -232,18 +267,32 @@ def build_qss(p: dict, glass: bool) -> str:
 #root {{ background: {bg}; border-radius: 16px; border: 1px solid {p['border']}; }}
 #title {{ color: {p['title']}; font-size: 13px; font-weight: 600; background: transparent; letter-spacing: 0.2px; }}
 #countPill {{ color: {p['count_text']}; background: {p['count_bg']};
-             border-radius: 10px; padding: 1px 8px; font-size: 10px; font-weight: 500; }}
+             border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; }}
 #toastPill {{ color: white; background: {accent};
              border-radius: 10px; padding: 1px 9px; font-size: 10px; font-weight: 600; }}
 
-.colHeader {{ color: {p['meta']}; font-size: 11px; font-weight: 500; background: transparent; padding: 2px 4px; }}
+.colHeader {{ color: {p.get('col_header', p['meta'])}; font-size: 12px; font-weight: 600; background: transparent; padding: 2px 4px; }}
 #colDivider {{ background: {p['divider']}; width: 1px; max-width: 1px; }}
 
-#helpBtn {{ background: transparent; color: {p['meta']}; font-weight: 500; border: none; }}
-#helpBtn:hover {{ background: {p['btn_hover']}; color: {p['title']}; }}
-#miniBlock {{ background: {p['card']}; border: 1px solid {p['border']}; border-radius: 24px; }}
+#helpBtn {{
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+    font-size: 14px;
+    font-weight: 800;
+    font-family: "Segoe UI", "Arial", sans-serif;
+    border: 1.5px solid rgba(239, 68, 68, 0.4);
+    border-radius: 12px;
+    padding: 0;
+    margin: 0;
+}}
+#helpBtn:hover {{
+    background: #ef4444;
+    color: #ffffff;
+    border-color: #ef4444;
+}}
+#miniBlock {{ background: {p['card']}; border: 1px solid {p['border']}; border-radius: 12px; }}
 
-.iconBtn {{ background: transparent; color: {p['meta']}; border: none;
+.iconBtn {{ background: transparent; color: {p['icon']}; border: none;
            border-radius: 8px; font-size: 12px; padding: 4px 7px; }}
 .iconBtn:hover {{ background: {p['btn_hover']}; color: {p['title']}; }}
 .iconBtn:pressed {{ background: {p['btn']}; }}
@@ -253,13 +302,15 @@ def build_qss(p: dict, glass: bool) -> str:
 #card {{ background: {p['card']}; border: 1px solid {p['card_border']}; border-radius: 12px; }}
 #card:hover {{ background: {p['card_hover']}; }}
 #cardName {{ color: {p['title']}; font-size: 12px; font-weight: 600; background: transparent; }}
-#cardMeta {{ color: {p['meta']}; font-size: 10px; background: transparent; }}
+#cardMeta {{ color: {p['meta']}; font-size: 11px; font-weight: 500; background: transparent; }}
 #badge {{ color: #ffffff; border-radius: 8px; font-size: 9px; font-weight: 700; }}
 #thumb {{ border-radius: 8px; background: {p['card_border']}; border: 1px solid {p['card_border']}; }}
 
 QCheckBox#selBox {{ background: transparent; padding: 2px; }}
 QCheckBox#selBox::indicator {{ width: 18px; height: 18px; border-radius: 6px;
     border: 1.5px solid {p['scroll']}; background: {p['card']}; }}
+QCheckBox#selBox::indicator:hover {{ border-color: {accent}; }}
+QCheckBox#selBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
 QCheckBox#selBox::indicator:hover {{ border-color: {accent}; }}
 QCheckBox#selBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
 
@@ -288,6 +339,18 @@ QCheckBox#selBox::indicator:checked {{ background: {accent}; border-color: {acce
 #previewBox {{ background: {p['preview_bg']}; border-radius: 14px; border: 1px solid {p['border']}; }}
 #previewTitle {{ color: {p['title']}; font-size: 13px; font-weight: 600; background: transparent; }}
 #previewBody {{ background: transparent; color: {p['title']}; font-size: 12px; border: none; }}
+
+.settingCard {{
+    background: {p['card']};
+    border: 1px solid {p['card_border']};
+    border-radius: 10px;
+    padding: 10px 14px;
+}}
+.groupTitle {{
+    font-size: 13px;
+    font-weight: 700;
+    color: {p['title']};
+}}
 
 /* ---- 输入控件（快速指令区/设置/对话框） ---- */
 QLineEdit, QPlainTextEdit {{
@@ -411,13 +474,47 @@ def elide(s: str, n: int = 22) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def elided_label(text: str, width: int, name: str) -> QLabel:
-    lab = QLabel(objectName=name)
-    fm = lab.fontMetrics()
-    lab.setText(fm.elidedText(text.replace("\n", " ").strip(),
-                              Qt.TextElideMode.ElideRight, width))
-    lab.setFixedWidth(width)
-    return lab
+class ElidedLabel(QLabel):
+    """自适应宽度的动态省略标签：
+    - 记录未截断的原始完整文本 _raw_text；
+    - 尺寸策略设为 Expanding，最小宽度设为 30px，允许随容器自由拉伸；
+    - 监听 resizeEvent，当窗口被用户横向拉大时，按实际即时宽度动态展开显示更多字符；
+    - 缩窄时平滑截断并在末尾添加优雅省略号 '…'；
+    - 完美兼容 setText() 动态更新（如“已复制”及恢复原文）。
+    """
+    def __init__(self, text: str = "", parent=None, objectName: str = ""):
+        super().__init__(parent)
+        if objectName:
+            self.setObjectName(objectName)
+        self._raw_text = str(text).replace("\r", " ").replace("\n", " ").strip()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(30)
+        self._update_elided()
+
+    def setText(self, text: str):
+        self._raw_text = str(text).replace("\r", " ").replace("\n", " ").strip()
+        self._update_elided()
+
+    def text(self) -> str:
+        return self._raw_text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_elided()
+
+    def _update_elided(self):
+        w = self.width()
+        if w > 10:
+            fm = self.fontMetrics()
+            elided = fm.elidedText(self._raw_text, Qt.TextElideMode.ElideRight, w)
+            super().setText(elided)
+        else:
+            super().setText(self._raw_text)
+
+
+def elided_label(text: str, width: int = 0, name: str = "") -> ElidedLabel:
+    """向下兼容的便捷工厂函数，返回自适应伸缩的 ElidedLabel。"""
+    return ElidedLabel(text, objectName=name)
 
 
 def safe_dest(name: str) -> str:
@@ -475,19 +572,25 @@ def unique_pinned_dest(name: str) -> str:
 
 
 def make_tray_icon() -> QIcon:
+    ico_path = APP_DIR / "assets" / "app.ico"
+    if ico_path.exists():
+        return QIcon(str(ico_path))
+    png_path = APP_DIR / "assets" / "app_logo_96.png"
+    if png_path.exists():
+        return QIcon(str(png_path))
     pm = QPixmap(64, 64)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     grad = QLinearGradient(0, 0, 64, 64)
-    grad.setColorAt(0, QColor("#2563eb"))
-    grad.setColorAt(1, QColor("#4f46e5"))
+    grad.setColorAt(0, QColor("#1e293b"))
+    grad.setColorAt(1, QColor("#0f172a"))
     p.setBrush(grad)
     p.setPen(Qt.PenStyle.NoPen)
     p.drawRoundedRect(4, 4, 56, 56, 14, 14)
-    p.setPen(QColor("white"))
-    p.setFont(QFont("Microsoft YaHei UI", 26, QFont.Weight.Bold))
-    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "S")
+    p.setPen(QColor("#f59e0b"))
+    p.setFont(QFont("Segoe UI Emoji", 24))
+    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "📋")
     p.end()
     return QIcon(pm)
 
@@ -507,7 +610,7 @@ def rounded_pixmap(pm: QPixmap, radius: int = 6) -> QPixmap:
 
 def enable_acrylic(hwnd: int, dark: bool) -> bool:
     try:
-        if sys.getwindowsversion().build < 22621:
+        if sys.platform != "win32" or sys.getwindowsversion().build < 22621:
             return False
         dwm = ctypes.windll.dwmapi
 
@@ -570,33 +673,33 @@ class _MSG(ctypes.Structure):
                 ("pt_x", ctypes.c_long), ("pt_y", ctypes.c_long)]
 
 
-_u32 = ctypes.windll.user32
-# 【BUG-005 教训：凡是返回值可能超出 32 位的 API 必须显式声明 restype】
-# 不声明则 ctypes 默认 c_long（4 字节），而 style 位、指针、lParam 都可能
-# 是 8 字节 —— 静默截断后行为诡异且无任何报错。
-_u32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
-_u32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
-_u32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
-_u32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int,
-                                  ctypes.c_ssize_t]
-_u32.SetWindowPos.restype = ctypes.c_int
-_u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
-                             ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                             ctypes.c_uint]
-_u32.ScreenToClient.restype = ctypes.c_int
-_u32.ScreenToClient.argtypes = [ctypes.c_void_p, ctypes.POINTER(_POINT)]
-_u32.GetClientRect.restype = ctypes.c_int
-_u32.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long * 4)]
-_u32.GetSystemMetrics.restype = ctypes.c_int
-_u32.GetSystemMetrics.argtypes = [ctypes.c_int]
-
-
 class _RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                 ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
-_u32.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+if sys.platform == "win32":
+    _u32 = ctypes.windll.user32
+    # 【BUG-005 教训：凡是返回值可能超出 32 位的 API 必须显式声明 restype】
+    # 不声明则 ctypes 默认 c_long（4 字节），而 style 位、指针、lParam 都可能
+    # 是 8 字节 —— 静默截断后行为诡异且无任何报错。
+    _u32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _u32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _u32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    _u32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                      ctypes.c_ssize_t]
+    _u32.SetWindowPos.restype = ctypes.c_int
+    _u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                                  ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_uint]
+    _u32.ScreenToClient.restype = ctypes.c_int
+    _u32.ScreenToClient.argtypes = [ctypes.c_void_p, ctypes.POINTER(_POINT)]
+    _u32.GetClientRect.restype = ctypes.c_int
+    _u32.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+    _u32.GetSystemMetrics.restype = ctypes.c_int
+    _u32.GetSystemMetrics.argtypes = [ctypes.c_int]
+else:
+    _u32 = None
 
 
 def _lparam_to_screen_point(lparam: int):
@@ -638,13 +741,103 @@ def enable_native_resize(hwnd: int) -> bool:
         return False
 
 
+def extract_preview_text(path: str, ext: str) -> tuple[str, str]:
+    """尝试以零外部依赖提取常见办公文档/文本文件的正文预览。
+    返回 (预览文本, 摘要说明)。
+    """
+    if not path or not os.path.exists(path):
+        return ("原文件不存在或已移动", "失效文件")
+    ext = ext.lower()
+
+    # 1. 常见纯文本、脚本与代码
+    TEXT_EXTS = {".txt", ".md", ".py", ".json", ".js", ".ts", ".html", ".htm", ".css",
+                 ".xml", ".yaml", ".yml", ".ini", ".cfg", ".log", ".csv", ".bat", ".cmd",
+                 ".ps1", ".sh", ".sql", ".java", ".c", ".cpp", ".h", ".go", ".rs"}
+    if ext in TEXT_EXTS:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read(10000)
+            return (content, f"文本内容预览 · 读取前 {len(content)} 字符")
+        except Exception as e:
+            return (f"读取失败: {e}", "文本文件")
+
+    # 2. Word 文档 (.docx)
+    if ext == ".docx":
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(path) as z:
+                tree = ET.fromstring(z.read("word/document.xml"))
+                paragraphs = []
+                for p in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+                    text = "".join(node.text for node in p.iter() if node.text)
+                    if text.strip():
+                        paragraphs.append(text.strip())
+                    if len(paragraphs) >= 80:
+                        break
+                if paragraphs:
+                    return ("\n\n".join(paragraphs), f"Word 文档正文预览 · 共 {len(paragraphs)} 个段落")
+        except Exception:
+            pass
+
+    # 3. PowerPoint 演示文稿 (.pptx)
+    if ext == ".pptx":
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(path) as z:
+                slide_files = sorted([n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")])
+                slides = []
+                for idx, sf in enumerate(slide_files[:30], 1):
+                    tree = ET.fromstring(z.read(sf))
+                    slide_txt = " ".join(node.text for node in tree.iter() if node.text and node.tag.endswith("}t")).strip()
+                    if slide_txt:
+                        slides.append(f"【第 {idx} 页幻灯片】\n{slide_txt}")
+                if slides:
+                    return ("\n\n".join(slides), f"PPT 幻灯片大纲预览 · 共 {len(slides)} 页")
+        except Exception:
+            pass
+
+    # 4. Excel 表格 (.xlsx)
+    if ext == ".xlsx":
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(path) as z:
+                if "xl/sharedStrings.xml" in z.namelist():
+                    tree = ET.fromstring(z.read("xl/sharedStrings.xml"))
+                    strings = [node.text.strip() for node in tree.iter() if node.text and node.text.strip()][:120]
+                    if strings:
+                        # 格式化成小表格展示
+                        chunks = [strings[i:i+4] for i in range(0, len(strings), 4)]
+                        table_view = "\n".join("  |  ".join(f"{col:<15}" for col in row) for row in chunks)
+                        return (table_view, f"Excel 核心数据项预览 · 共 {len(strings)} 个文本单元格")
+        except Exception:
+            pass
+
+    # 5. markitdown 提取兜底（如 PDF、老格式等）
+    try:
+        from markitdown import MarkItDown
+        md = MarkItDown()
+        res = md.convert(path)
+        if res and res.text_content:
+            trimmed = res.text_content[:6000].strip()
+            if trimmed:
+                return (trimmed, f"智能解析预览 · 提取前 {min(6000, len(trimmed))} 字符")
+    except Exception:
+        pass
+
+    return ("", "")
+
+
 class QuickPreviewPopup(QWidget):
     """
-    按空格键触发的瞬时轻量快照预览：
-    - 大图查看：展示原比例清晰预览（最大 440x320）
-    - 文本全文：完整文本滚动查阅
-    - 文件名片：类型徽标、名称、体积、源路径
-    - 关闭即刻释放 QPixmap 与大文本内存，杜绝内存膨胀
+    按空格键触发的瞬时轻量快照预览（翻倍大视野）：
+    - 截图大图：800x560 超大高清视界，纤毫毕现
+    - 文本全文：800x540 宽敞排版，滚动通览，一键复制
+    - Office 文档：Word/Excel/PPT/PDF/代码 直接提取内容大窗阅读
+    - 文件夹名片：包含子项统计与直通打开
+    - 随时按 Space 或 Esc 瞬关并释放内存
     """
     def __init__(self, entry: dict, parent_shelf):
         super().__init__(None, Qt.WindowType.FramelessWindowHint
@@ -653,80 +846,296 @@ class QuickPreviewPopup(QWidget):
         self.entry = entry
         self.shelf = parent_shelf
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setStyleSheet(parent_shelf.app_qss)
         self._build_ui()
 
     def _build_ui(self):
+        theme = self.shelf.settings.get("theme", "dark")
+        p = PALETTES.get(theme, PALETTES["dark"])
+        src = self.entry.get("src", "")
+        is_folder = self.entry.get("is_dir") or (src and os.path.isdir(src))
+
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         box = QFrame(objectName="previewBox")
         root.addWidget(box)
 
         v = QVBoxLayout(box)
-        v.setContentsMargins(12, 10, 12, 10)
-        v.setSpacing(8)
+        v.setContentsMargins(18, 14, 18, 14)
+        v.setSpacing(10)
 
         # 头部
         head = QHBoxLayout()
-        icon = "截图预览" if self.entry["kind"] == "image" else ("文本全文" if self.entry["kind"] == "text" else "文件名片")
-        head.addWidget(QLabel(icon, objectName="previewTitle"))
+        head.setSpacing(10)
+
+        if self.entry["kind"] == "image":
+            title_text = "📷 高清截图预览"
+        elif self.entry["kind"] == "text":
+            title_text = "📝 纯文本全文预览"
+        elif is_folder:
+            title_text = "📁 文件夹名片"
+        else:
+            ext = os.path.splitext(self.entry["name"])[1].lstrip(".").upper() or "文件"
+            title_text = f"📄 {ext} 文档与极速预览"
+
+        t_lab = QLabel(title_text, objectName="previewTitle")
+        t_lab.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {p['title']};")
+        head.addWidget(t_lab)
         head.addStretch(1)
+
+        # 右上角系统打开/快捷复制
+        if self.entry["kind"] == "text":
+            cp_btn = QPushButton("复制全文")
+            cp_btn.setProperty("class", "footerBtn")
+            cp_btn.setFixedHeight(24)
+            cp_btn.clicked.connect(lambda: self.shelf.copy_single_entry(self.entry))
+            head.addWidget(cp_btn)
+        elif src and os.path.exists(src):
+            open_ext = QPushButton("外部打开")
+            open_ext.setProperty("class", "footerBtn")
+            open_ext.setFixedHeight(24)
+            open_ext.clicked.connect(lambda: self.shelf.open_entry(self.entry))
+            head.addWidget(open_ext)
+
         close_btn = QPushButton("✕", objectName="closeBtn")
         close_btn.setProperty("class", "iconBtn")
-        close_btn.setFixedSize(22, 22)
+        close_btn.setFixedSize(24, 24)
         close_btn.clicked.connect(self.close)
         head.addWidget(close_btn)
         v.addLayout(head)
 
-        # 主体内容
+        # 主体内容区域
         if self.entry["kind"] == "image":
             img_path = self.shelf._entry_path(self.entry["name"])
             lab = QLabel()
             lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pm = QPixmap(img_path)
+            meta_str = ""
             if not pm.isNull():
-                scaled_pm = pm.scaled(420, 280, Qt.AspectRatioMode.KeepAspectRatio,
+                # 翻倍大视野：最大缩放到 800x560
+                scaled_pm = pm.scaled(800, 560, Qt.AspectRatioMode.KeepAspectRatio,
                                       Qt.TransformationMode.SmoothTransformation)
                 lab.setPixmap(scaled_pm)
+                target_w = max(520, min(860, scaled_pm.width() + 48))
+                target_h = max(380, min(660, scaled_pm.height() + 85))
+                self.resize(target_w, target_h)
+                meta_str = f"原图尺寸: {pm.width()} × {pm.height()} 像素 · 文件大小: {fmt_size(self.entry.get('size', 0))}"
             else:
                 lab.setText("（无法读取图片内容）")
-            v.addWidget(lab)
-            self.resize(440, 340)
+                self.resize(520, 360)
+            v.addWidget(lab, stretch=1)
+            if meta_str:
+                foot_meta = QLabel(f"💡 {meta_str} · 按空格键或 Esc 随时退出", objectName="cardMeta")
+                foot_meta.setStyleSheet(f"color: {p['meta']}; font-size: 11px;")
+                v.addWidget(foot_meta)
 
         elif self.entry["kind"] == "text":
-            te = QPlainTextEdit(self.entry["text"])
+            raw_text = self.entry["text"]
+            te = QPlainTextEdit(raw_text)
             te.setReadOnly(True)
             te.setObjectName("previewBody")
-            v.addWidget(te)
-            self.resize(420, 260)
+            te.setStyleSheet(f"""
+                QPlainTextEdit {{
+                    background: {p['card']};
+                    border: 1px solid {p['card_border']};
+                    border-radius: 10px;
+                    padding: 16px 18px;
+                    font-size: 15px;
+                    line-height: 1.8;
+                    color: {p['title']};
+                }}
+            """)
+            v.addWidget(te, stretch=1)
+            char_cnt = len(raw_text)
+            lines = [line for line in raw_text.splitlines() if line.strip()]
+            line_cnt = len(lines) if lines else 1
+            foot_meta = QLabel(f"💡 统计：{char_cnt} 字符 · {len(raw_text.splitlines())} 行 · 按空格键或 Esc 随时退出", objectName="cardMeta")
+            foot_meta.setStyleSheet(f"color: {p['meta']}; font-size: 11px;")
+            v.addWidget(foot_meta)
+
+            # 智能自适应高度：短文本小巧紧凑不留大白板，长文本宽畅通透
+            if line_cnt <= 2 and char_cnt < 80:
+                self.resize(680, 240)
+            elif line_cnt <= 4 and char_cnt < 160:
+                self.resize(720, 320)
+            elif line_cnt <= 8 and char_cnt < 350:
+                self.resize(780, 420)
+            else:
+                self.resize(820, 580)
+
+        elif is_folder:
+            f_frame = QFrame()
+            f_frame.setStyleSheet(f"background: {p['card']}; border: 1px solid {p['card_border']}; border-radius: 8px; padding: 14px;")
+            fv = QVBoxLayout(f_frame)
+            fv.setSpacing(8)
+
+            top_h = QHBoxLayout()
+            folder_ic = QLabel()
+            try:
+                ic = _get_icon_provider().icon(QFileIconProvider.IconType.Folder)
+                folder_ic.setPixmap(ic.pixmap(48, 48))
+            except Exception:
+                folder_ic.setText("📁")
+                folder_ic.setStyleSheet("font-size: 36px;")
+            top_h.addWidget(folder_ic)
+
+            nm_col = QVBoxLayout()
+            nm_lab = QLabel(self.entry["name"])
+            nm_lab.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {p['title']};")
+            nm_col.addWidget(nm_lab)
+            nm_col.addWidget(QLabel("文件夹目录", objectName="cardMeta"))
+            top_h.addLayout(nm_col, stretch=1)
+            fv.addLayout(top_h)
+
+            # 统计子项
+            sub_info = "无法统计内容"
+            if src and os.path.exists(src):
+                try:
+                    entries = os.listdir(src)
+                    sub_info = f"共包含 {len(entries)} 个项目（{', '.join(entries[:6])}{'...' if len(entries) > 6 else ''}）"
+                except Exception:
+                    sub_info = "系统受保护目录"
+
+            info_text = (
+                f"📁 包含项目：{sub_info}\n"
+                f"⏰ 捕获时间：{self.entry.get('ts', '-')}\n"
+                f"📍 真实路径：{src}"
+            )
+            detail = QLabel(info_text)
+            detail.setStyleSheet(f"color: {p['title']}; font-size: 12px; line-height: 1.6;")
+            detail.setWordWrap(True)
+            fv.addWidget(detail)
+            v.addWidget(f_frame, stretch=1)
+
+            btn_box = QHBoxLayout()
+            open_folder_btn = QPushButton(" 在资源管理器中打开此文件夹")
+            open_folder_btn.setProperty("class", "colActionBtn")
+            open_folder_btn.setObjectName("primaryColBtn")
+            open_folder_btn.setFixedHeight(30)
+            open_folder_btn.clicked.connect(lambda: self.shelf.open_entry(self.entry))
+            btn_box.addWidget(open_folder_btn)
+            v.addLayout(btn_box)
+            self.resize(640, 360)
 
         else:
-            src = self.entry.get("src", "")
-            ext = os.path.splitext(self.entry["name"])[1].lstrip(".").upper() or "FILE"
-            info = QLabel(
-                f"文件名: {self.entry['name']}\n"
-                f"类型: {ext} 文件\n"
-                f"大小: {fmt_size(self.entry.get('size', 0))}\n"
-                f"捕获时间: {self.entry.get('ts', '-')}\n"
-                f"源路径: {src}"
-            )
-            info.setObjectName("previewBody")
-            info.setWordWrap(True)
-            v.addWidget(info)
-            self.resize(400, 200)
+            # 具体文件：尝试智能提取内容（Word / Excel / PPT / PDF / 文本代码）
+            ext = os.path.splitext(self.entry["name"])[1].lower()
+            preview_content, summary = extract_preview_text(src, ext)
 
-        # 快捷键与居中定位
+            if preview_content:
+                # 能够提取到文本内容：展示大号预览阅读器
+                head_sub = QLabel(f"🔍 {summary}", objectName="cardMeta")
+                head_sub.setStyleSheet(f"color: {p['meta']}; font-size: 11px;")
+                v.addWidget(head_sub)
+
+                te = QPlainTextEdit(preview_content)
+                te.setReadOnly(True)
+                te.setStyleSheet(f"""
+                    QPlainTextEdit {{
+                        background: {p['card']};
+                        border: 1px solid {p['card_border']};
+                        border-radius: 10px;
+                        padding: 14px 16px;
+                        font-size: 14px;
+                        line-height: 1.7;
+                        color: {p['title']};
+                    }}
+                """)
+                v.addWidget(te, stretch=1)
+
+                foot_h = QHBoxLayout()
+                path_info = QLabel(f"源路径: {src} · 体积: {fmt_size(self.entry.get('size', 0))}")
+                path_info.setStyleSheet(f"color: {p['meta']}; font-size: 11px;")
+                foot_h.addWidget(path_info, stretch=1)
+
+                op_btn = QPushButton("用默认软件打开")
+                op_btn.setProperty("class", "colActionBtn")
+                op_btn.setFixedHeight(28)
+                op_btn.clicked.connect(lambda: self.shelf.open_entry(self.entry))
+                foot_h.addWidget(op_btn)
+                v.addLayout(foot_h)
+                self.resize(820, 580)   # 翻倍大视野
+
+            else:
+                # 二进制文件或不可提取文件：大号名片卡
+                f_frame = QFrame()
+                f_frame.setStyleSheet(f"background: {p['card']}; border: 1px solid {p['card_border']}; border-radius: 8px; padding: 14px;")
+                fv = QVBoxLayout(f_frame)
+                fv.setSpacing(8)
+
+                top_h = QHBoxLayout()
+                file_ic = QLabel()
+                if src and os.path.exists(src):
+                    try:
+                        fi = QFileInfo(src)
+                        ic = _get_icon_provider().icon(fi)
+                        file_ic.setPixmap(ic.pixmap(48, 48))
+                    except Exception:
+                        pass
+                if not file_ic.pixmap() or file_ic.pixmap().isNull():
+                    file_ic.setText("📄")
+                    file_ic.setStyleSheet("font-size: 36px;")
+                top_h.addWidget(file_ic)
+
+                nm_col = QVBoxLayout()
+                nm_lab = QLabel(self.entry["name"])
+                nm_lab.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {p['title']};")
+                nm_col.addWidget(nm_lab)
+                nm_col.addWidget(QLabel(f"{ext.upper().lstrip('.')} 文件 · 大小: {fmt_size(self.entry.get('size', 0))}", objectName="cardMeta"))
+                top_h.addLayout(nm_col, stretch=1)
+                fv.addLayout(top_h)
+
+                info_text = (
+                    f"📄 文件名：{self.entry['name']}\n"
+                    f"📦 文件大小：{fmt_size(self.entry.get('size', 0))} ({self.entry.get('size', 0)} 字节)\n"
+                    f"⏰ 捕获时间：{self.entry.get('ts', '-')}\n"
+                    f"📍 存储路径：{src}"
+                )
+                detail = QLabel(info_text)
+                detail.setStyleSheet(f"color: {p['title']}; font-size: 12px; line-height: 1.6;")
+                detail.setWordWrap(True)
+                fv.addWidget(detail)
+                v.addWidget(f_frame, stretch=1)
+
+                btn_box = QHBoxLayout()
+                open_file_btn = QPushButton(" 用系统软件打开")
+                open_file_btn.setProperty("class", "colActionBtn")
+                open_file_btn.setObjectName("primaryColBtn")
+                open_file_btn.setFixedHeight(30)
+                open_file_btn.clicked.connect(lambda: self.shelf.open_entry(self.entry))
+                btn_box.addWidget(open_file_btn)
+
+                reveal_btn = QPushButton(" 在文件夹中定位")
+                reveal_btn.setProperty("class", "colActionBtn")
+                reveal_btn.setFixedHeight(30)
+                reveal_btn.clicked.connect(lambda: self.shelf._reveal_in_explorer(src))
+                btn_box.addWidget(reveal_btn)
+                v.addLayout(btn_box)
+                self.resize(640, 360)
+
+        # 快捷键与自适应屏幕安全居中
         QShortcut(QKeySequence("Space"), self).activated.connect(self.close)
         QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
 
+        screen = QGuiApplication.primaryScreen().availableGeometry()
         geo = self.shelf.geometry()
-        x = max(20, geo.left() + (geo.width() - self.width()) // 2)
-        y = max(20, geo.top() + (geo.height() - self.height()) // 2)
+        w, h = self.width(), self.height()
+        # 居中对齐，严格防止超出屏幕
+        x = max(30, min(screen.right() - w - 30, geo.left() + (geo.width() - w) // 2))
+        y = max(30, min(screen.bottom() - h - 30, geo.top() + (geo.height() - h) // 2))
         self.move(x, y)
 
     def closeEvent(self, ev):
+        try:
+            for child in self.findChildren(QLabel):
+                child.clear()
+            for child in self.findChildren(QPlainTextEdit):
+                child.clear()
+        except Exception:
+            pass
         super().closeEvent(ev)
-        gc.collect()
+        trim_working_set()
 
 
 # ------------------------------------------------------------------ 双栏分轨智能卡片
@@ -836,19 +1245,45 @@ class ShelfCard(QFrame):
     def _create_badge(self) -> QWidget:
         e = self.entry
         if e["kind"] == "text":
-            b = QLabel("TXT", objectName="badge")
-            b.setFixedSize(32, 32)
-            b.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            b.setStyleSheet("#badge { background:#2563eb; border-radius:6px; }")
-            return b
+            raw = str(e.get("text", "")).strip()
+            theme = self.shelf.settings.get("theme", "dark")
+            is_dark = (theme == "dark")
+            is_url = raw.startswith(("http://", "https://", "ftp://", "www."))
+
+            badge = QLabel()
+            badge.setFixedSize(32, 32)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            if is_url:
+                bg = "rgba(59, 130, 246, 0.18)" if is_dark else "rgba(37, 99, 235, 0.10)"
+                bd = "rgba(59, 130, 246, 0.35)" if is_dark else "rgba(37, 99, 235, 0.25)"
+                ic_col = "#60a5fa" if is_dark else "#2563eb"
+                badge.setStyleSheet(f"background: {bg}; border: 1px solid {bd}; border-radius: 8px;")
+                badge.setPixmap(_icon("link", ic_col, 16).pixmap(16, 16))
+            else:
+                bg = "rgba(255, 255, 255, 0.08)" if is_dark else "#eef2f6"
+                bd = "rgba(255, 255, 255, 0.12)" if is_dark else "#cbd5e1"
+                ic_col = "#94a3b8" if is_dark else "#475569"
+                badge.setStyleSheet(f"background: {bg}; border: 1px solid {bd}; border-radius: 8px;")
+                badge.setPixmap(_icon("text", ic_col, 16).pixmap(16, 16))
+            return badge
         elif e["kind"] == "image":
             thumb = QLabel(objectName="thumb")
             thumb.setFixedSize(32, 32)
             thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
             try:
                 img_path = self.shelf._entry_path(e["name"])
-                pm = QPixmap(img_path)
-                if not pm.isNull():
+                # 内存极致防爆：采用 QImageReader 流式流式解码（64x64）
+                # 原图不进内存，单图解码内存降低 99%，彻底根除 4K/2K 截图导致的显存和物理内存尖峰
+                reader = QImageReader(img_path)
+                reader.setAutoTransform(True)
+                orig_sz = reader.size()
+                if orig_sz.isValid() and not orig_sz.isEmpty():
+                    scale_sz = orig_sz.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio)
+                    reader.setScaledSize(scale_sz)
+                img = reader.read()
+                if not img.isNull():
+                    pm = QPixmap.fromImage(img)
                     thumb.setPixmap(rounded_pixmap(pm.scaled(
                         32, 32, Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation), 5))
@@ -858,12 +1293,48 @@ class ShelfCard(QFrame):
                 thumb.setText("图片")
             return thumb
         else:
+            src = e.get("src", "")
+            is_folder = e.get("is_dir") or (src and os.path.isdir(src))
+
+            # 1. 文件夹：直接展示系统原生金色文件夹大图标
+            if is_folder:
+                thumb = QLabel(objectName="thumb")
+                thumb.setFixedSize(32, 32)
+                thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                try:
+                    ic = _get_icon_provider().icon(QFileIconProvider.IconType.Folder)
+                    pm = ic.pixmap(32, 32)
+                    if not pm.isNull():
+                        thumb.setPixmap(pm)
+                        return thumb
+                except Exception:
+                    pass
+                thumb.setText("📁")
+                thumb.setStyleSheet("font-size: 20px; background: transparent;")
+                return thumb
+
+            # 2. 具体文件：直接提取该文件在系统关联的真实软件图标（Word/Excel/PDF/PPT/代码等）
+            if src and os.path.exists(src):
+                try:
+                    fi = QFileInfo(src)
+                    ic = _get_icon_provider().icon(fi)
+                    pm = ic.pixmap(32, 32)
+                    if not pm.isNull():
+                        thumb = QLabel(objectName="thumb")
+                        thumb.setFixedSize(32, 32)
+                        thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                        thumb.setPixmap(pm)
+                        return thumb
+                except Exception:
+                    pass
+
+            # 3. 兜底降级：根据扩展名显示精致彩色徽章
             ext = os.path.splitext(e["name"])[1].lstrip(".").upper()[:4] or "FILE"
             b = QLabel(ext, objectName="badge")
             b.setFixedSize(32, 32)
             b.setAlignment(Qt.AlignmentFlag.AlignCenter)
             bg_col = EXT_COLORS.get(ext.lower(), "#64748b")
-            b.setStyleSheet(f"#badge {{ background:{bg_col}; border-radius:6px; }}")
+            b.setStyleSheet(f"#badge {{ background:{bg_col}; border-radius:6px; font-weight:600; font-size:10px; color:white; }}")
             return b
 
     def _on_toggled(self, on: bool):
@@ -895,14 +1366,18 @@ class ShelfCard(QFrame):
     # ----- 鼠标与拖拽
     def enterEvent(self, ev):
         self.hover_bar.show()
+        self.shelf._hovered_entry = self.entry      # 记录当前悬停项，供 Space 预览
         super().enterEvent(ev)
 
     def leaveEvent(self, ev):
         self.hover_bar.hide()
+        if getattr(self.shelf, "_hovered_entry", None) == self.entry:
+            self.shelf._hovered_entry = None
         super().leaveEvent(ev)
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()                             # 显式获取键盘焦点
             self._drag_start_pos = ev.position().toPoint()
             self.shelf._selected_entry = self.entry      # 供 Space 预览定位
             # 程序内双击自判定（路径 A）：Qt 原生判定要求两次按压几乎零位移，
@@ -1083,15 +1558,29 @@ class SmallBlock(QFrame):
         # Translucent background so border-radius corners are truly transparent
         # (without this, the corners show the system default color)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(96, 96)   # 用户嫌 48 太小，放大一倍
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setFixedSize(48, 48)   # 变为原先 1/4 面积的精致小方块（48x48）
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        lab = QLabel("🗂", self)
-        lab.setStyleSheet("font-size: 44px; background: transparent;")
+        lab = QLabel(self)
         lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        from PyQt6.QtWidgets import QVBoxLayout
+
+        logo_path = APP_DIR / "assets" / "app_logo_96.png"
+        if logo_path.exists():
+            pm = QPixmap(str(logo_path))
+            if not pm.isNull():
+                scaled = pm.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+                lab.setPixmap(rounded_pixmap(scaled, 9))
+            else:
+                lab.setText("🗂")
+                lab.setStyleSheet("font-size: 22px; background: transparent;")
+        else:
+            lab.setText("🗂")
+            lab.setStyleSheet("font-size: 22px; background: transparent;")
+
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(3, 3, 3, 3)
         lay.addWidget(lab)
         # 拖动状态（按下记偏移，移动超阈值才视为拖动，未拖动松开才展开）
         self._press_global = None   # 按下时的全局坐标
@@ -1128,14 +1617,14 @@ class SmallBlock(QFrame):
         super().mouseReleaseEvent(ev)
 
 
-# ------------------------------------------------------------------ 设置对话框
+# ------------------------------------------------------------------ 设置对话框（现代化分块卡片排版）
 class SettingsDialog(QDialog):
     def __init__(self, shelf):
         super().__init__(shelf)
         self.shelf = shelf
-        self.setWindowTitle("设置")
+        self.setWindowTitle("选项设置")
         self.setModal(False)
-        self.setFixedSize(360, 500)
+        self.setFixedSize(460, 640)
         self.setStyleSheet(shelf.app_qss)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
@@ -1145,147 +1634,259 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         box = QFrame(objectName="previewBox")
         root.addWidget(box)
+
         v = QVBoxLayout(box)
-        v.setContentsMargins(16, 14, 16, 14)
+        v.setContentsMargins(18, 14, 18, 14)
         v.setSpacing(10)
 
+        # 顶栏
         head = QHBoxLayout()
-        head.addWidget(QLabel("选项设置", objectName="previewTitle"))
+        head.addWidget(QLabel("⚙ 选项设置", objectName="previewTitle"))
         head.addStretch(1)
-        done = QPushButton("完成")
-        done.setProperty("class", "footerBtn")
-        done.setFixedSize(54, 26)
-        done.clicked.connect(self.close)
-        head.addWidget(done)
+        close_top = QPushButton("✕", objectName="closeBtn")
+        close_top.setProperty("class", "iconBtn")
+        close_top.setFixedSize(22, 22)
+        close_top.clicked.connect(self.close)
+        head.addWidget(close_top)
         v.addLayout(head)
+
+        # 滚动区域包装（确保小屏幕不被挤压）
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        content_w = QWidget()
+        cv = QVBoxLayout(content_w)
+        cv.setContentsMargins(0, 0, 4, 0)
+        cv.setSpacing(10)
+
+        # --- 模块 1：🎨 界面外观与视觉动效 ---
+        card_app = QFrame()
+        card_app.setProperty("class", "settingCard")
+        av = QVBoxLayout(card_app)
+        av.setSpacing(8)
+        av.addWidget(QLabel("🎨 界面与外观", objectName="cardName"))
 
         # 主题
         r1 = QHBoxLayout()
-        r1.addWidget(QLabel("界面主题", objectName="cardName"))
+        r1.addWidget(QLabel("界面主题", objectName="cardMeta"))
         r1.addStretch(1)
         self.t_dark = QPushButton("深色", checkable=True)
         self.t_light = QPushButton("浅色", checkable=True)
         for b in (self.t_dark, self.t_light):
             b.setProperty("class", "colActionBtn")
-            b.setFixedSize(54, 24)
-        cur = self.shelf.settings["theme"]
+            b.setFixedSize(56, 26)
+        cur = self.shelf.settings.get("theme", "dark")
         self.t_dark.setChecked(cur == "dark")
         self.t_light.setChecked(cur == "light")
         self.t_dark.clicked.connect(lambda: self.set_theme("dark"))
         self.t_light.clicked.connect(lambda: self.set_theme("light"))
         r1.addWidget(self.t_dark)
         r1.addWidget(self.t_light)
-        v.addLayout(r1)
+        av.addLayout(r1)
 
-        # 玻璃质感
-        r2 = QHBoxLayout()
-        self.glass_cb = QCheckBox("Win11 亚克力模糊效果")
-        self.glass_cb.setObjectName("cardName")
-        self.glass_cb.setChecked(bool(self.shelf.settings.get("glass")))
+        # 亚克力
+        self.glass_cb = QCheckBox("Win11 亚克力磨砂模糊效果")
+        self.glass_cb.setObjectName("cardMeta")
+        self.glass_cb.setChecked(bool(self.shelf.settings.get("glass", True)))
         self.glass_cb.toggled.connect(self.set_glass)
-        r2.addWidget(self.glass_cb)
-        r2.addStretch(1)
-        v.addLayout(r2)
+        av.addWidget(self.glass_cb)
 
         # 透明度
         r3 = QVBoxLayout()
         lab = QHBoxLayout()
-        lab.addWidget(QLabel("窗口不透明度", objectName="cardName"))
+        lab.addWidget(QLabel("窗口不透明度", objectName="cardMeta"))
         lab.addStretch(1)
-        self.op_val = QLabel(f"{self.shelf.settings['opacity']}%", objectName="cardMeta")
+        self.op_val = QLabel(f"{self.shelf.settings.get('opacity', 96)}%", objectName="cardMeta")
         lab.addWidget(self.op_val)
         r3.addLayout(lab)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(50, 100)
-        self.slider.setValue(int(self.shelf.settings["opacity"]))
+        self.slider.setValue(int(self.shelf.settings.get("opacity", 96)))
         self.slider.valueChanged.connect(self.set_opacity)
         r3.addWidget(self.slider)
-        v.addLayout(r3)
+        av.addLayout(r3)
+        cv.addWidget(card_app)
 
-        # 暂存目录（临时中转文件，清空批次仅清理这里）
-        r4 = QVBoxLayout()
-        r4.addWidget(QLabel("暂存目录（临时中转，清空只清这里）", objectName="cardName"))
-        row4 = QHBoxLayout()
-        self.dir_lab = QLabel(self.shelf.settings.get("shelf_dir", str(SHELF_DIR)), objectName="cardMeta")
-        self.dir_lab.setFixedWidth(230)
-        change_s = QPushButton("更改…")
-        change_s.setProperty("class", "footerBtn")
-        change_s.setFixedSize(54, 24)
-        change_s.clicked.connect(self.change_shelf_dir)
-        row4.addWidget(self.dir_lab)
-        row4.addStretch(1)
-        row4.addWidget(change_s)
-        r4.addLayout(row4)
-        v.addLayout(r4)
+        # --- 模块 2：📁 本地数据存储（四大存储中心） ---
+        card_dir = QFrame()
+        card_dir.setProperty("class", "settingCard")
+        dv = QVBoxLayout(card_dir)
+        dv.setSpacing(8)
+        dv.addWidget(QLabel("📁 本地存储中心（四大目录，支持指定任意路径）", objectName="cardName"))
 
-        # 每日日志存放目录（支持指向 Obsidian 等外部知识库）
-        r5 = QVBoxLayout()
-        r5.addWidget(QLabel("每日剪贴板日志保存目录（可指定 Obsidian 库）", objectName="cardName"))
-        row5 = QHBoxLayout()
-        self.hist_lab = QLabel(self.shelf.settings.get("history_dir", str(HISTORY_DIR)), objectName="cardMeta")
-        self.hist_lab.setFixedWidth(230)
-        change_h = QPushButton("更改…")
-        change_h.setProperty("class", "footerBtn")
-        change_h.setFixedSize(54, 24)
-        change_h.clicked.connect(self.change_hist_dir)
-        row5.addWidget(self.hist_lab)
-        row5.addStretch(1)
-        row5.addWidget(change_h)
-        r5.addLayout(row5)
-        v.addLayout(r5)
+        # 1. 暂存目录
+        self._make_dir_row(dv, "暂存区（临时素材中转，清空仅清理这里）",
+                           self.shelf.settings.get("shelf_dir", str(SHELF_DIR)),
+                           self.change_shelf_dir, "dir_lab")
 
-        # 常用托管文件区（三仓之一，清空批次绝不涉及）
-        r6 = QVBoxLayout()
-        r6.addWidget(QLabel("常用托管文件区（清空批次绝不涉及）", objectName="cardName"))
-        row6 = QHBoxLayout()
-        self.pinned_lab = QLabel(self.shelf.settings.get("pinned_dir", str(PINNED_DIR)), objectName="cardMeta")
-        self.pinned_lab.setFixedWidth(230)
-        change_p = QPushButton("更改…")
-        change_p.setProperty("class", "footerBtn")
-        change_p.setFixedSize(54, 24)
-        change_p.clicked.connect(self.change_pinned_dir)
-        row6.addWidget(self.pinned_lab)
-        row6.addStretch(1)
-        row6.addWidget(change_p)
-        r6.addLayout(row6)
-        v.addLayout(r6)
+        # 2. 每日日志
+        self._make_dir_row(dv, "每日剪贴板日志保存目录（可指定 Obsidian 库）",
+                           self.shelf.settings.get("history_dir", str(HISTORY_DIR)),
+                           self.change_hist_dir, "hist_lab")
 
-        # 素材保留策略（默认永不自动清除）
-        r7 = QHBoxLayout()
-        r7.addWidget(QLabel("素材保留", objectName="cardName"))
-        r7.addStretch(1)
-        self.keep_never = QPushButton("永不清除", checkable=True)
-        self.keep_24 = QPushButton("24小时", checkable=True)
+        # 3. 快速访问
+        self._make_dir_row(dv, "常用托管文件区（快速访问，清空绝不涉及）",
+                           self.shelf.settings.get("pinned_dir", str(PINNED_DIR)),
+                           self.change_pinned_dir, "pinned_lab")
+
+        # 4. 快速指令（提示词库）—— 补齐配置
+        self._make_dir_row(dv, "⚡ 快速指令（提示词库，支持指定 Obsidian 知识库）",
+                           self.shelf.settings.get("prompts_dir", str(APP_DIR / "_Prompts")),
+                           self.change_prompts_dir, "prompts_lab")
+
+        cv.addWidget(card_dir)
+
+        # --- 模块 3：⏱️ 素材保留策略（默认保留 7 天，支持自定义天数） ---
+        card_ret = QFrame()
+        card_ret.setProperty("class", "settingCard")
+        rv = QVBoxLayout(card_ret)
+        rv.setSpacing(8)
+        rv.addWidget(QLabel("⏱️ 素材保留期限（默认 7 天）", objectName="cardName"))
+
+        r_btns = QHBoxLayout()
+        self.keep_168 = QPushButton("7天(默认)", checkable=True)
         self.keep_72 = QPushButton("3天", checkable=True)
-        self.keep_168 = QPushButton("7天", checkable=True)
-        for b in (self.keep_never, self.keep_24, self.keep_72, self.keep_168):
-            b.setProperty("class", "colActionBtn")
-            b.setFixedSize(58, 24)
-        cur_h = int(self.shelf.settings.get("auto_clear_hours", 0) or 0)
-        self.keep_never.setChecked(cur_h == 0)
-        self.keep_24.setChecked(cur_h == 24)
-        self.keep_72.setChecked(cur_h == 72)
-        self.keep_168.setChecked(cur_h == 168)
-        self.keep_never.clicked.connect(lambda: self.set_retention(0))
-        self.keep_24.clicked.connect(lambda: self.set_retention(24))
-        self.keep_72.clicked.connect(lambda: self.set_retention(72))
-        self.keep_168.clicked.connect(lambda: self.set_retention(168))
-        r7.addWidget(self.keep_never)
-        r7.addWidget(self.keep_24)
-        r7.addWidget(self.keep_72)
-        r7.addWidget(self.keep_168)
-        v.addLayout(r7)
-        v.addWidget(QLabel("清除在下次启动时生效；每日日志不受影响", objectName="cardMeta"))
+        self.keep_24 = QPushButton("24小时", checkable=True)
+        self.keep_never = QPushButton("永不清除", checkable=True)
+        self.keep_custom = QPushButton("自定义", checkable=True)
 
-        # 呼出热键 + 开机自启
-        self.build_hotkey_row(v)
-        self.build_autostart_row(v)
+        for b in (self.keep_168, self.keep_72, self.keep_24, self.keep_never, self.keep_custom):
+            b.setProperty("class", "colActionBtn")
+            b.setFixedHeight(26)
+
+        cur_h = int(self.shelf.settings.get("auto_clear_hours", 168) or 0)
+        self.keep_168.setChecked(cur_h == 168)
+        self.keep_72.setChecked(cur_h == 72)
+        self.keep_24.setChecked(cur_h == 24)
+        self.keep_never.setChecked(cur_h == 0)
+        self.keep_custom.setChecked(cur_h not in (0, 24, 72, 168))
+
+        self.keep_168.clicked.connect(lambda: self.set_retention(168))
+        self.keep_72.clicked.connect(lambda: self.set_retention(72))
+        self.keep_24.clicked.connect(lambda: self.set_retention(24))
+        self.keep_never.clicked.connect(lambda: self.set_retention(0))
+        self.keep_custom.clicked.connect(self._toggle_custom_retention)
+
+        r_btns.addWidget(self.keep_168)
+        r_btns.addWidget(self.keep_72)
+        r_btns.addWidget(self.keep_24)
+        r_btns.addWidget(self.keep_never)
+        r_btns.addWidget(self.keep_custom)
+        rv.addLayout(r_btns)
+
+        # 自定义天数输入行
+        self.custom_row = QWidget()
+        cr_h = QHBoxLayout(self.custom_row)
+        cr_h.setContentsMargins(0, 0, 0, 0)
+        cr_h.setSpacing(6)
+        cr_h.addWidget(QLabel("自定义保留天数：", objectName="cardMeta"))
+        cur_days = max(1, cur_h // 24) if cur_h > 0 else 7
+        self.custom_days_edit = QLineEdit(str(cur_days))
+        self.custom_days_edit.setFixedWidth(56)
+        self.custom_days_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cr_h.addWidget(self.custom_days_edit)
+        cr_h.addWidget(QLabel("天", objectName="cardMeta"))
+        apply_days = QPushButton("保存")
+        apply_days.setProperty("class", "footerBtn")
+        apply_days.setFixedSize(50, 24)
+        apply_days.clicked.connect(self._apply_custom_days)
+        cr_h.addWidget(apply_days)
+        cr_h.addStretch(1)
+        rv.addWidget(self.custom_row)
+        self.custom_row.setVisible(cur_h not in (0, 24, 72, 168))
+
+        hint_lab = QLabel("到期仅在下次启动时清理暂存区；每日日志与快速指令库绝对安全", objectName="cardMeta")
+        hint_lab.setStyleSheet("font-size: 10px;")
+        rv.addWidget(hint_lab)
+        cv.addWidget(card_ret)
+
+        # --- 模块 4：⌨️ 系统集成与全局热键 ---
+        card_sys = QFrame()
+        card_sys.setProperty("class", "settingCard")
+        sv = QVBoxLayout(card_sys)
+        sv.setSpacing(8)
+        sv.addWidget(QLabel("⚙️ 系统集成与快捷键", objectName="cardName"))
+
+        self.build_hotkey_row(sv)
+        self.build_autostart_row(sv)
+        cv.addWidget(card_sys)
+
+        scroll.setWidget(content_w)
+        v.addWidget(scroll, stretch=1)
+
+        # 底部完成按钮
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        done_btn = QPushButton("完成并生效", objectName="primaryColBtn")
+        done_btn.setProperty("class", "footerBtn")
+        done_btn.setFixedSize(110, 30)
+        done_btn.clicked.connect(self.close)
+        foot.addWidget(done_btn)
+        v.addLayout(foot)
+
+        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
+
+    def _make_dir_row(self, layout, title: str, path: str, on_change, attr_name: str):
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        col.addWidget(QLabel(title, objectName="cardMeta"))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lab = QLabel(path, objectName="cardMeta")
+        lab.setStyleSheet("color: #64748b; font-size: 11px;")
+        lab.setToolTip(path)
+        setattr(self, attr_name, lab)
+        change_btn = QPushButton("更改…")
+        change_btn.setProperty("class", "footerBtn")
+        change_btn.setFixedSize(54, 24)
+        change_btn.clicked.connect(on_change)
+        row.addWidget(lab, stretch=1)
+        row.addWidget(change_btn)
+        col.addLayout(row)
+        layout.addLayout(col)
+
+    def change_prompts_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "选择快速指令（提示词库）保存目录 (可指定 Obsidian 库)",
+            self.shelf.settings.get("prompts_dir", str(APP_DIR / "_Prompts")))
+        if d:
+            new_path = os.path.realpath(d)
+            self.shelf.set_setting("prompts_dir", new_path)
+            self.prompts_lab.setText(new_path)
+            self.prompts_lab.setToolTip(new_path)
+            self.shelf.prompts = PromptsStore(Path(new_path))
+            self.shelf.refresh_prompts_page()
+            self.shelf._toast("快速指令库目录已更新")
+
+    def _toggle_custom_retention(self):
+        self.set_retention(-1)
+        self.custom_row.setVisible(True)
+
+    def _apply_custom_days(self):
+        try:
+            days = max(1, int(self.custom_days_edit.text().strip()))
+        except ValueError:
+            days = 7
+            self.custom_days_edit.setText("7")
+        hours = days * 24
+        self.shelf.set_setting("auto_clear_hours", hours)
+        self.shelf._toast(f"素材保留策略已设置为 {days} 天")
 
     def set_retention(self, hours: int):
-        for b, h in ((self.keep_never, 0), (self.keep_24, 24),
-                     (self.keep_72, 72), (self.keep_168, 168)):
-            b.setChecked(h == hours)
-        self.shelf.set_setting("auto_clear_hours", hours)
+        self.keep_168.setChecked(hours == 168)
+        self.keep_72.setChecked(hours == 72)
+        self.keep_24.setChecked(hours == 24)
+        self.keep_never.setChecked(hours == 0)
+        self.keep_custom.setChecked(hours not in (0, 24, 72, 168))
+        self.custom_row.setVisible(hours not in (0, 24, 72, 168))
+        if hours >= 0:
+            self.shelf.set_setting("auto_clear_hours", hours)
+            if hours == 0:
+                self.shelf._toast("素材保留策略已设为：永不自动清除")
+            else:
+                self.shelf._toast(f"素材保留策略已设为：{hours // 24} 天")
 
     # 呼出热键（可配置）
     def build_hotkey_row(self, v):
@@ -1345,6 +1946,7 @@ class SettingsDialog(QDialog):
         if d:
             self.shelf.set_setting("shelf_dir", os.path.realpath(d))
             self.dir_lab.setText(self.shelf.settings["shelf_dir"])
+            self.dir_lab.setToolTip(self.shelf.settings["shelf_dir"])
 
     def change_hist_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择每日日志存放目录 (如 Obsidian 库)",
@@ -1352,6 +1954,7 @@ class SettingsDialog(QDialog):
         if d:
             self.shelf.set_setting("history_dir", os.path.realpath(d))
             self.hist_lab.setText(self.shelf.settings["history_dir"])
+            self.hist_lab.setToolTip(self.shelf.settings["history_dir"])
 
     def change_pinned_dir(self):
         d = QFileDialog.getExistingDirectory(self, "选择常用托管文件区",
@@ -1359,6 +1962,261 @@ class SettingsDialog(QDialog):
         if d:
             self.shelf.set_setting("pinned_dir", os.path.realpath(d))
             self.pinned_lab.setText(self.shelf.settings["pinned_dir"])
+            self.pinned_lab.setToolTip(self.shelf.settings["pinned_dir"])
+
+
+# ------------------------------------------------------------------ 完整功能使用帮助大弹窗
+class HelpDialog(QDialog):
+    """独立宽屏使用指南大窗口（740x580，支持自由缩放、现代化卡片富文本排版）"""
+    def __init__(self, shelf):
+        super().__init__(shelf)
+        self.shelf = shelf
+        self.setWindowTitle("轻松剪贴板 (EasyClipboard) · 完整功能与使用技巧指南")
+        self.resize(740, 580)
+        self.setMinimumSize(600, 440)
+        self.setWindowIcon(make_tray_icon())
+        self.setModal(False)
+        self._build_ui()
+
+    def _build_ui(self):
+        theme = self.shelf.settings.get("theme", "dark")
+        is_dark = (theme == "dark")
+        p = PALETTES.get(theme, PALETTES["dark"])
+
+        self.setStyleSheet(f"""
+            QDialog {{ background: {p['bg_solid']}; color: {p['title']}; }}
+            QTextBrowser {{
+                background: transparent;
+                border: none;
+                color: {p['title']};
+                selection-background-color: {p['btn_primary']};
+            }}
+            #helpHeader {{
+                background: {p['card']};
+                border-bottom: 1px solid {p['border']};
+                padding: 10px 18px;
+            }}
+            #helpFooter {{
+                background: {p['card']};
+                border-top: 1px solid {p['border']};
+                padding: 10px 18px;
+            }}
+            #primaryColBtn {{
+                background: {p['btn_primary']};
+                color: #ffffff;
+                font-weight: 600;
+                border-radius: 8px;
+                padding: 6px 16px;
+                border: none;
+            }}
+            #primaryColBtn:hover {{ background: {p['btn_primary_hover']}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 顶部 Header
+        header = QFrame(objectName="helpHeader")
+        hh = QHBoxLayout(header)
+        hh.setContentsMargins(14, 10, 14, 10)
+        hh.setSpacing(12)
+
+        # Logo
+        logo_lab = QLabel()
+        logo_lab.setFixedSize(36, 36)
+        logo_path = APP_DIR / "assets" / "app_logo_96.png"
+        if logo_path.exists():
+            pm = QPixmap(str(logo_path))
+            if not pm.isNull():
+                scaled = pm.scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+                logo_lab.setPixmap(rounded_pixmap(scaled, 8))
+        hh.addWidget(logo_lab)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        h_title = QLabel("轻松剪贴板 (EasyClipboard) · 核心技巧与使用说明")
+        h_title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {p['title']};")
+        h_sub = QLabel("双轨极速中转 · 永久剪贴记忆 · 快速指令库 · 极度轻量")
+        h_sub.setStyleSheet(f"font-size: 11px; color: {p['meta']};")
+        title_box.addWidget(h_title)
+        title_box.addWidget(h_sub)
+        hh.addLayout(title_box, stretch=1)
+
+        close_top = QPushButton("✕")
+        close_top.setFixedSize(26, 26)
+        close_top.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {p['meta']}; font-size: 13px; border: none; border-radius: 6px; }}
+            QPushButton:hover {{ background: {p['danger_bg']}; color: {p['danger']}; }}
+        """)
+        close_top.clicked.connect(self.close)
+        hh.addWidget(close_top)
+        layout.addWidget(header)
+
+        # 主体富文本展示区
+        self.browser = QTextBrowser()
+        self.browser.setOpenExternalLinks(True)
+        self.browser.setHtml(self._render_html(is_dark, p))
+        layout.addWidget(self.browser, stretch=1)
+
+        # 底部操作栏
+        footer = QFrame(objectName="helpFooter")
+        fh = QHBoxLayout(footer)
+        fh.setContentsMargins(18, 10, 18, 10)
+        hint = QLabel("💡 提示：窗口支持鼠标边缘自由缩放，随时按 Esc 键即可快速关闭")
+        hint.setStyleSheet(f"color: {p['meta']}; font-size: 11px;")
+        fh.addWidget(hint)
+        fh.addStretch(1)
+
+        ok_btn = QPushButton("我知道了，开始使用", objectName="primaryColBtn")
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.clicked.connect(self.close)
+        fh.addWidget(ok_btn)
+        layout.addWidget(footer)
+
+        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
+
+    def _render_html(self, is_dark: bool, p: dict) -> str:
+        bg_card = "#27272a" if is_dark else "#ffffff"
+        bd_card = "#3f3f46" if is_dark else "#e2e8f0"
+        title_color = "#f4f4f5" if is_dark else "#0f172a"
+        text_color = "#d4d4d8" if is_dark else "#334155"
+        sec_title = "#60a5fa" if is_dark else "#0284c7"
+        kbd_bg = "#333338" if is_dark else "#f1f5f9"
+        kbd_bd = "#52525b" if is_dark else "#cbd5e1"
+        kbd_txt = "#f5f5f7" if is_dark else "#0f172a"
+
+        return f'''
+        <html>
+        <head>
+        <style>
+            body {{
+                font-family: "PingFang SC", "Microsoft YaHei UI", -apple-system, sans-serif;
+                margin: 18px 22px;
+                color: {text_color};
+                font-size: 13px;
+                line-height: 1.65;
+            }}
+            .card {{
+                background: {bg_card};
+                border: 1px solid {bd_card};
+                border-radius: 10px;
+                padding: 14px 18px;
+                margin-bottom: 14px;
+            }}
+            h2 {{
+                color: {sec_title};
+                font-size: 14px;
+                font-weight: 700;
+                margin-top: 0;
+                margin-bottom: 8px;
+                padding-bottom: 4px;
+                border-bottom: 1px dashed {bd_card};
+            }}
+            ul {{ margin: 4px 0 6px 0; padding-left: 20px; }}
+            li {{ margin-bottom: 6px; }}
+            b {{ color: {title_color}; }}
+            kbd {{
+                background: {kbd_bg};
+                border: 1px solid {kbd_bd};
+                border-bottom: 2px solid {kbd_bd};
+                border-radius: 4px;
+                color: {kbd_txt};
+                display: inline-block;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 1px 6px;
+                margin: 0 2px;
+            }}
+            .table-box {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 6px;
+            }}
+            .table-box th, .table-box td {{
+                border: 1px solid {bd_card};
+                padding: 6px 12px;
+                text-align: left;
+                font-size: 12px;
+            }}
+            .table-box th {{
+                background: rgba(0,0,0,0.05);
+                color: {title_color};
+                font-weight: 600;
+            }}
+        </style>
+        </head>
+        <body>
+
+        <div class="card">
+            <h2>🚀 一、核心架构：双轨分轨与极致轻量</h2>
+            <ul>
+                <li><b>左栏（附件与截图）</b>：自动收录复制的本地文件、微信/企微接收文件与系统截图，大文件采用<b>零拷贝</b>引用，绝不重复占用磁盘。</li>
+                <li><b>右栏（文字碎片）</b>：纯文字片段自动归入，自动清洗排版，双击直接复制全文。</li>
+                <li><b>物理内存极致克制</b>：主面板隐藏或折叠为小方块时，操作系统自动回收休眠工作集，常驻物理内存仅 <b>15MB ~ 25MB</b>。</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>🖱️ 二、键鼠高效交互（一贴一拖，用完即清）</h2>
+            <ul>
+                <li><b>单击卡片任意位置</b>：直接勾选进底栏待交付清单，免去微操瞄准复选框。</li>
+                <li><b>双击卡片</b>：文字卡 = <b>立即复制全文</b>；附件卡 = <b>调用系统关联程序极速打开</b>。</li>
+                <li><b>空格键极速预览 (<kbd>Space</kbd>)</b>：鼠标悬停或单击选中任意卡片，按键盘空格键瞬时调出<b>高清大图/全文长文/文件详情</b>浮窗，再按空格即收！</li>
+                <li><b>整包外发交付</b>：在微信、企微、钉钉等聊天窗口中，长按底栏<b>「按住拖出全部选中附件」</b>，所有选中文件一次性批量拖入松手发送。</li>
+                <li><b>清空批次</b>：点击底部红色垃圾桶，瞬间重置工作台临时素材（每日工作日志与快速指令库受永久保护，绝不受影响）。</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>⚡ 三、快速指令（提示词收藏夹与 Markdown 知识库）</h2>
+            <ul>
+                <li><b>独立本地 Markdown 存储</b>：每段提示词都是本地独立的 <code>.md</code> 文件，永不绑定私有格式。</li>
+                <li><b>资源管理器双向秒级直通</b>：
+                    <ul>
+                        <li>点击顶部<b>「📁 打开目录」</b>，直接在资源管理器中管理提示词分类文件夹；</li>
+                        <li>在分类或提示词卡片上<b>右键 →「在资源管理器中打开」</b>，自动定位高亮该 <code>.md</code>；</li>
+                        <li>外部直接增删改文件，回到软件点击<b>「🔄 刷新」</b>即可瞬间完成磁盘对账同步！</li>
+                    </ul>
+                </li>
+                <li><b>快速收纳</b>：在文字卡片上右键 → 选择<b>「加入快速…」</b>，或在「今日日志」右侧点击 <b>⚡</b> 按钮，一键归类收藏。</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>📅 四、永久工作记忆（Daily Clipboard Journal）</h2>
+            <ul>
+                <li><b>每日自动留痕</b>：每天复制的所有纯文字片段，自动按天归档至 <code>_History/YYYY-MM-DD.md</code>，永久保存。</li>
+                <li><b>智能去重过滤</b>：相同内容连续复制自动过滤；2 字以下误触拦截，绝不刷屏。</li>
+                <li><b>应用内查看与外部编辑</b>：点击底部<b>「今日日志」</b>在面板内直接翻阅，也可点击<b>「外部打开」</b>用 Obsidian 或外部编辑器编辑。</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>⌨️ 五、全局快捷键速查表</h2>
+            <table class="table-box">
+                <tr><th>快捷键</th><th>触发动作</th><th>适用场景与说明</th></tr>
+                <tr><td><kbd>Alt + V</kbd> 或 <kbd>F9</kbd></td><td><b>呼出 / 隐藏主面板</b></td><td>全局随时唤起；隐藏或收起时操作系统自动释放内存</td></tr>
+                <tr><td><kbd>F10</kbd></td><td><b>暂停 / 恢复剪贴板捕获</b></td><td>复制账号密码或私密数据前按 F10 临时静默</td></tr>
+                <tr><td><kbd>Space (空格)</kbd></td><td><b>极速快照预览</b></td><td>选中或悬停卡片后按空格瞬开大图或长文，用完即关</td></tr>
+                <tr><td><kbd>Esc</kbd></td><td><b>快速关闭当前窗口</b></td><td>帮助窗口、预览弹窗、主窗口随时秒退</td></tr>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>🎨 六、窗口形态与个性化定制</h2>
+            <ul>
+                <li><b>折叠小方块挂件（标题栏「—」）</b>：主窗口收缩为 <b>48×48</b> 像素的高清微型挂件，可按住自由拖拽停靠在屏幕边缘，原地点击秒级展开。</li>
+                <li><b>自由边缘拉伸</b>：主窗口四边四角与右下角把手均可自由缩放，文字自适应展开，告别留白浪费。</li>
+                <li><b>个性化设置（标题栏「⚙」）</b>：支持深色/浅色主题、毛玻璃亚克力效果、透明度滑块与开机自启动。</li>
+            </ul>
+        </div>
+
+        </body>
+        </html>
+        '''
 
 
 # ------------------------------------------------------------------ 主窗口（左右分轨）
@@ -1456,6 +2314,14 @@ class Shelf(QWidget):
         poll.timeout.connect(self._poll_backend)
         poll.start()
 
+        # 内存自愈守护：空闲与后台工作集修剪（每 30 秒自检）
+        # 当窗口处于折叠态、隐藏态或连续无交互时，自动清空缓存并归还闲置物理页
+        self._idle_ticks = 0
+        self._mem_timer = QTimer(self)
+        self._mem_timer.setInterval(30000)
+        self._mem_timer.timeout.connect(self._on_idle_mem_trim)
+        self._mem_timer.start()
+
         # 缩放光标状态：边缘热区常被各种子控件覆盖（滚动区/按钮/信息等），
         # 它们自带的光标会盖住父窗口的光标 —— 这就是“缩放能用但图标不变”
         # 的根因。修复：全局事件过滤器直接对【鼠标命中的那个控件】设/恢复
@@ -1466,6 +2332,10 @@ class Shelf(QWidget):
         if app is not None and os.environ.get("SHELF_NO_GLOB_FILTER") != "1":
             app.installEventFilter(self)
 
+        # 全局空格键极速预览快捷键（无死角响应）
+        self._space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        self._space_shortcut.activated.connect(self._trigger_space_preview)
+
     def _poll_backend(self):
         try:
             mt = (SHELF_DIR / MANIFEST_NAME).stat().st_mtime
@@ -1473,6 +2343,7 @@ class Shelf(QWidget):
             mt = 0
         if mt != getattr(self, "_manifest_mtime", -1):
             self._manifest_mtime = mt
+            self._idle_ticks = 0
             self._load_manifest()
             self._sync_ui()
         sig = SHELF_DIR / ".show_sig"
@@ -1487,6 +2358,20 @@ class Shelf(QWidget):
             self._paused = paused
             self._update_counter()
             self._toast("已暂停捕获" if paused else "已恢复捕获")
+
+    def _on_idle_mem_trim(self):
+        """后台内存自愈修剪：如果窗口不可见、折叠为小方块或持续空闲，主动释放物理内存"""
+        try:
+            is_hidden_or_collapsed = (not self.isVisible()) or getattr(self, "_collapsed", False)
+            if is_hidden_or_collapsed:
+                trim_working_set()
+            else:
+                self._idle_ticks += 1
+                if self._idle_ticks >= 2:  # 前台连续 60 秒无新内容捕获，收缩空闲工作集
+                    self._idle_ticks = 0
+                    trim_working_set()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ 界面构建
     def _build_ui(self):
@@ -1541,23 +2426,21 @@ class Shelf(QWidget):
         self.select_all_btn.clicked.connect(self.toggle_select_all)
         h.addWidget(self.select_all_btn)
 
-        help_btn = QPushButton("", objectName="helpBtn")
-        help_btn.setProperty("class", "iconBtn")
-        help_btn.setToolTip("使用帮助")
-        help_btn.setFixedSize(26, 26)
-        help_btn.setIcon(_icon("help", PALETTES[self.settings.get("theme", "dark")]["meta"]))
-        help_btn.setIconSize(QSize(15, 15))
-        help_btn.clicked.connect(lambda: self._switch_view(3))
-        h.addWidget(help_btn)
+        self.help_btn = QPushButton("?", objectName="helpBtn")
+        self.help_btn.setToolTip("使用帮助（完整功能与快捷键指南）")
+        self.help_btn.setFixedSize(24, 24)
+        self.help_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.help_btn.clicked.connect(self.open_help_dialog)
+        h.addWidget(self.help_btn)
 
-        gear = QPushButton("")
-        gear.setProperty("class", "iconBtn")
-        gear.setToolTip("设置")
-        gear.setFixedWidth(26)
-        gear.setIcon(_icon("gear", PALETTES[self.settings.get("theme", "dark")]["meta"]))
-        gear.setIconSize(QSize(15, 15))
-        gear.clicked.connect(self.open_settings)
-        h.addWidget(gear)
+        self.gear_btn = QPushButton("")
+        self.gear_btn.setProperty("class", "iconBtn")
+        self.gear_btn.setToolTip("设置")
+        self.gear_btn.setFixedWidth(26)
+        self.gear_btn.setIcon(_icon("gear", PALETTES[self.settings.get("theme", "dark")]["icon"]))
+        self.gear_btn.setIconSize(QSize(16, 16))
+        self.gear_btn.clicked.connect(self.open_settings)
+        h.addWidget(self.gear_btn)
 
         self.pin_btn = QPushButton("")
         self.pin_btn.setProperty("class", "iconBtn")
@@ -1683,25 +2566,28 @@ class Shelf(QWidget):
         foot_bar = QHBoxLayout()
         foot_bar.setSpacing(8)
 
+        theme_cfg = PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])
+        ic_col = theme_cfg["icon"]
+
         self.quick_btn = QPushButton(" 快速访问")
-        self.quick_btn.setIcon(_icon("star", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
-        self.quick_btn.setIconSize(QSize(13, 13))
+        self.quick_btn.setIcon(_icon("star", ic_col))
+        self.quick_btn.setIconSize(QSize(15, 15))
         self.quick_btn.setProperty("class", "footerBtn")
         self.quick_btn.setToolTip("你固定的常用文件夹与文件，随时点开直达")
         self.quick_btn.clicked.connect(lambda: self._switch_view(1))
         foot_bar.addWidget(self.quick_btn)
 
         self.journal_btn2 = QPushButton(" 今日日志")
-        self.journal_btn2.setIcon(_icon("doc", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
-        self.journal_btn2.setIconSize(QSize(13, 13))
+        self.journal_btn2.setIcon(_icon("doc", ic_col))
+        self.journal_btn2.setIconSize(QSize(15, 15))
         self.journal_btn2.setProperty("class", "footerBtn")
         self.journal_btn2.setToolTip("在应用内查看今天的复制日志（不弹外部程序）")
         self.journal_btn2.clicked.connect(lambda: self._switch_view(2))
         foot_bar.addWidget(self.journal_btn2)
 
         self.prompts_btn2 = QPushButton(" 快速指令")
-        self.prompts_btn2.setIcon(_icon("bolt", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["btn_primary"]))
-        self.prompts_btn2.setIconSize(QSize(13, 13))
+        self.prompts_btn2.setIcon(_icon("bolt", theme_cfg["btn_primary"]))
+        self.prompts_btn2.setIconSize(QSize(15, 15))
         self.prompts_btn2.setProperty("class", "footerBtn")
         self.prompts_btn2.setToolTip("提示词收藏夹：分类存放，双击即拷")
         self.prompts_btn2.clicked.connect(lambda: self._switch_view(4))
@@ -1709,13 +2595,13 @@ class Shelf(QWidget):
 
         foot_bar.addStretch(1)
 
-        purge_btn = QPushButton(" 清空当前批次", objectName="purgeBtn")
-        purge_btn.setIcon(_icon("trash", PALETTES.get(self.settings.get("theme", "dark"), PALETTES["dark"])["meta"]))
-        purge_btn.setIconSize(QSize(13, 13))
-        purge_btn.setProperty("class", "footerBtn")
-        purge_btn.setToolTip("清空当前临时托盘（每日工作日志受严格保护，绝不被清空）")
-        purge_btn.clicked.connect(self.purge)
-        foot_bar.addWidget(purge_btn)
+        self.purge_btn = QPushButton(" 清空当前批次", objectName="purgeBtn")
+        self.purge_btn.setIcon(_icon("trash", theme_cfg.get("danger", "#ef4444")))
+        self.purge_btn.setIconSize(QSize(15, 15))
+        self.purge_btn.setProperty("class", "footerBtn")
+        self.purge_btn.setToolTip("清空当前临时托盘（每日工作日志受严格保护，绝不被清空）")
+        self.purge_btn.clicked.connect(self.purge)
+        foot_bar.addWidget(self.purge_btn)
 
         dual_v.addLayout(foot_bar)
 
@@ -2174,8 +3060,17 @@ class Shelf(QWidget):
                            objectName="empty")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.journal_box.addWidget(empty)
-        # 最新在最上
-        for ts, body in reversed(parsed):
+        # 内存与控件安全保护：UI 仅渲染最新 80 条记录，防止海量碎片导致 GDI 句柄泄漏与卡顿
+        MAX_JOURNAL_ROWS = 80
+        show_items = list(reversed(parsed))
+        if len(show_items) > MAX_JOURNAL_ROWS:
+            notice = QLabel(f"ℹ️ 仅展示今日最新 {MAX_JOURNAL_ROWS} 条记录（全量 {len(show_items)} 条已安全保存在本地 Markdown 文件中）",
+                            objectName="cardMeta")
+            notice.setStyleSheet("color: #94a3b8; font-size: 11px; padding: 4px 8px;")
+            self.journal_box.addWidget(notice)
+            show_items = show_items[:MAX_JOURNAL_ROWS]
+
+        for ts, body in show_items:
             self.journal_box.addWidget(self._make_journal_row(ts, body))
         self.journal_box.addStretch(1)
 
@@ -2258,22 +3153,33 @@ class Shelf(QWidget):
         self.prompt_docs_box.addStretch(1)
 
     def _reveal_in_explorer(self, target_path: str):
-        """在 Windows 资源管理器中打开目录，或定位高亮选中具体文件。"""
+        """在系统资源管理器 / 访达中打开目录，或定位高亮选中具体文件。"""
         try:
             p = os.path.abspath(target_path)
-            if os.path.isfile(p):
-                subprocess.Popen(["explorer", f"/select,{os.path.normpath(p)}"])
-            elif os.path.isdir(p):
-                os.startfile(p)
-            else:
-                parent = os.path.dirname(p)
-                if os.path.exists(parent):
-                    os.startfile(parent)
+            if sys.platform == "win32":
+                if os.path.isfile(p):
+                    subprocess.Popen(["explorer", f"/select,{os.path.normpath(p)}"])
+                elif os.path.isdir(p):
+                    os.startfile(p)
+                else:
+                    parent = os.path.dirname(p)
+                    if os.path.exists(parent):
+                        os.startfile(parent)
+                    else:
+                        os.makedirs(p, exist_ok=True)
+                        os.startfile(p)
+            elif sys.platform == "darwin":
+                if os.path.isfile(p):
+                    subprocess.Popen(["open", "-R", p])
                 else:
                     os.makedirs(p, exist_ok=True)
-                    os.startfile(p)
+                    subprocess.Popen(["open", p])
+            else:
+                target = p if os.path.isdir(p) else os.path.dirname(p)
+                os.makedirs(target, exist_ok=True)
+                subprocess.Popen(["xdg-open", target])
         except Exception as e:
-            self._toast(f"打开资源管理器失败：{e}")
+            self._toast(f"打开文件管理器失败：{e}")
 
     def _prompt_open_current_folder(self):
         """在资源管理器中打开当前选中的分类文件夹（或快速指令根目录）。"""
@@ -2594,7 +3500,7 @@ class Shelf(QWidget):
         DWMWCP_ROUND = 2 强制给窗口加圆角，与 QSS 无关，绝对可靠。
         """
         try:
-            if sys.getwindowsversion().build < 22621:
+            if sys.platform != "win32" or sys.getwindowsversion().build < 22621:
                 return False
             dwm = ctypes.windll.dwmapi
             DWMWA_WINDOW_CORNER_PREFERENCE = 33
@@ -2627,6 +3533,26 @@ class Shelf(QWidget):
         # 圆角走 DWM（DWMWCP_ROUND），与玻璃效果互不冲突；
         # apply_look 在启动/主题切换/置顶切换时反复调用，DWM 属性幂等可重复设。
         self._apply_rounded_corners()
+        self._refresh_icons()
+
+    def _refresh_icons(self):
+        """深色/浅色模式切换时，动态刷新所有常驻按钮的图标对比度与清晰度。"""
+        try:
+            theme = PALETTES[self.settings.get("theme", "dark")]
+            ic_col = theme.get("icon", theme["title"])
+
+            if hasattr(self, "gear_btn"):
+                self.gear_btn.setIcon(_icon("gear", ic_col))
+            if hasattr(self, "quick_btn"):
+                self.quick_btn.setIcon(_icon("star", ic_col))
+            if hasattr(self, "journal_btn2"):
+                self.journal_btn2.setIcon(_icon("doc", ic_col))
+            if hasattr(self, "prompts_btn2"):
+                self.prompts_btn2.setIcon(_icon("bolt", theme["btn_primary"]))
+            if hasattr(self, "purge_btn"):
+                self.purge_btn.setIcon(_icon("trash", theme.get("danger", "#ef4444")))
+        except Exception:
+            pass
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -2640,6 +3566,19 @@ class Shelf(QWidget):
     def hideEvent(self, ev):
         super().hideEvent(ev)
         trim_working_set()
+
+    def open_help_dialog(self):
+        if not hasattr(self, "_help_dlg") or self._help_dlg is None:
+            self._help_dlg = HelpDialog(self)
+        self._help_dlg.show()
+        self._help_dlg.raise_()
+        self._help_dlg.activateWindow()
+        g = self.frameGeometry()
+        screen_geo = QGuiApplication.primaryScreen().availableGeometry()
+        w, h = self._help_dlg.width(), self._help_dlg.height()
+        x = max(20, min(screen_geo.right() - w - 20, g.left() + (g.width() - w) // 2))
+        y = max(20, min(screen_geo.bottom() - h - 20, g.top() + (g.height() - h) // 2))
+        self._help_dlg.move(x, y)
 
     def open_settings(self):
         if self._settings_dlg is None:
@@ -2701,6 +3640,8 @@ class Shelf(QWidget):
     # ---------------------------------------------------------- 看守进程守护
     def _watchdog_alive(self) -> bool:
         """探测看守进程是否在跑（靠它自己持有的单实例互斥锁）。"""
+        if sys.platform != "win32":
+            return False
         try:
             k32 = ctypes.windll.kernel32
             k32.SetLastError(0)
@@ -2720,6 +3661,8 @@ class Shelf(QWidget):
         看守 F9 拉起界面；界面启动时拉起看守。
         两侧都有单实例锁（看守用 mutex、界面用 QLocalServer），重复拉起安全。
         """
+        if sys.platform != "win32":
+            return
         if self._watchdog_alive():
             return
         try:
@@ -2754,6 +3697,8 @@ class Shelf(QWidget):
             print(f"[Shelf] 拉起看守失败: {e}", file=sys.stderr, flush=True)
 
     def autostart_enabled(self) -> bool:
+        if sys.platform != "win32":
+            return False
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -2761,10 +3706,14 @@ class Shelf(QWidget):
                                 winreg.KEY_READ) as k:
                 winreg.QueryValueEx(k, self.AUTOSTART_NAME)
                 return True
-        except OSError:
+        except (OSError, ImportError):
             return False
 
     def set_autostart(self, enabled: bool):
+        if sys.platform != "win32":
+            self.settings["autostart"] = enabled
+            save_settings(self.settings)
+            return
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.AUTOSTART_KEY, 0,
@@ -2781,7 +3730,7 @@ class Shelf(QWidget):
                     self._toast("已关闭开机自启")
             self.settings["autostart"] = enabled
             save_settings(self.settings)
-        except OSError as e:
+        except (OSError, ImportError) as e:
             self._toast(f"自启设置失败: {e}")
 
     def eventFilter(self, obj, ev):
@@ -3185,6 +4134,38 @@ class Shelf(QWidget):
         for e in self.entries:
             e["on"] = target
         self._commit()
+
+    def _trigger_space_preview(self):
+        """空格键极速快照预览（手感媲美 macOS QuickLook）：
+        - 若当前预览弹窗已经打开，再次按空格直接关闭（Toggle 模式）
+        - 优先取鼠标悬停卡片（_hovered_entry）
+        - 其次取点击选中卡片（_selected_entry）
+        - 再次取当前已勾选的第一项
+        - 最后取素材列表的第一项
+        """
+        if self._preview_dlg is not None and self._preview_dlg.isVisible():
+            self._preview_dlg.close()
+            self._preview_dlg = None
+            return
+
+        entry = getattr(self, "_hovered_entry", None) or getattr(self, "_selected_entry", None)
+        if not entry:
+            for e in getattr(self, "entries", []):
+                if e.get("on"):
+                    entry = e
+                    break
+        if not entry and getattr(self, "entries", []):
+            entry = self.entries[0]
+
+        if entry:
+            self.show_quick_preview(entry)
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Space:
+            self._trigger_space_preview()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
 
     def show_quick_preview(self, entry: dict):
         if self._preview_dlg is not None:
@@ -3963,15 +4944,44 @@ def acquire_single_instance() -> bool:
     return True
 
 
+def _enable_high_dpi():
+    """开启 Windows 硬件级 Per-Monitor DPI Aware V2 原生高清渲染。
+    彻底杜绝 Windows DWM 双线性插值拉伸导致的字体泛白发虚和低分辨率感！
+    """
+    if sys.platform == "win32":
+        try:
+            # Win10 1703+ DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            try:
+                # Win8.1 / Win10 早期：PROCESS_PER_MONITOR_DPI_AWARE = 2
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+
+
 def main():
     # 必须在 faulthandler.enable() 之前：windowed exe 下 stderr 是 None，
     # 直接 enable 会抛 RuntimeError，界面根本起不来（BUG-007）。
     _ensure_stdio()
+    _enable_high_dpi()
     import faulthandler
     faulthandler.enable()                # 任何原生崩溃都在 stderr 留下完整调用栈
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName("SmartStagingShelf")
     app.setQuitOnLastWindowClosed(False)
+    try:
+        QPixmapCache.setCacheLimit(2048)
+    except Exception:
+        pass
     if not acquire_single_instance():
         print("[Shelf] 已有实例在运行")
         return 0

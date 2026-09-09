@@ -25,12 +25,28 @@ import keyboard
 
 
 def trim_working_set() -> None:
-    """看守进程工作集收缩：保持常驻物理内存在 3MB~8MB 的极低状态。"""
+    """看守进程工作集收缩：调用 Windows psapi.EmptyWorkingSet 保持常驻物理内存在极低状态。"""
     try:
         gc.collect()
         if sys.platform == "win32":
-            ctypes.windll.kernel32.SetProcessWorkingSetSize(
-                ctypes.windll.kernel32.GetCurrentProcess(), -1, -1)
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            h_proc = k32.GetCurrentProcess()
+            try:
+                psapi.EmptyWorkingSet.argtypes = [wintypes.HANDLE]
+                psapi.EmptyWorkingSet.restype = wintypes.BOOL
+                psapi.EmptyWorkingSet(h_proc)
+            except Exception:
+                pass
+            try:
+                k32.SetProcessWorkingSetSize.argtypes = [wintypes.HANDLE, ctypes.c_size_t, ctypes.c_size_t]
+                k32.SetProcessWorkingSetSize.restype = wintypes.BOOL
+                c_neg = ctypes.c_size_t(-1).value
+                k32.SetProcessWorkingSetSize(h_proc, c_neg, c_neg)
+            except Exception:
+                pass
     except Exception:
         pass
 
