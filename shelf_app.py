@@ -33,7 +33,7 @@ from icons import icon as _icon
 from PyQt6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QFont,
                           QDrag, QIcon, QAction, QKeySequence,
                           QShortcut, QLinearGradient, QPainterPath,
-                          QImageReader, QPixmapCache)
+                          QImageReader, QPixmapCache, QDesktopServices)
 from PyQt6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
                               QVBoxLayout, QHBoxLayout, QScrollArea,
                               QFrame, QSystemTrayIcon, QMenu, QMessageBox,
@@ -1922,8 +1922,19 @@ class SettingsDialog(QDialog):
         self.auto_cb.setChecked(self.shelf.autostart_enabled())
         self.auto_cb.toggled.connect(self.set_autostart)
         r9.addWidget(self.auto_cb)
-        r9.addStretch(1)
         v.addLayout(r9)
+
+        r_gh = QHBoxLayout()
+        gh_lab = QLabel("官方主页与更新", objectName="cardName")
+        r_gh.addWidget(gh_lab)
+        r_gh.addStretch(1)
+        gh_link = QPushButton("访问 GitHub Releases")
+        gh_link.setProperty("class", "footerBtn")
+        gh_link.setFixedHeight(24)
+        gh_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        gh_link.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/CatBoss-Paw/EasyClipboard/releases")))
+        r_gh.addWidget(gh_link)
+        v.addLayout(r_gh)
 
     def set_autostart(self, on: bool):
         self.shelf.set_autostart(bool(on))
@@ -2044,6 +2055,27 @@ class HelpDialog(QDialog):
         title_box.addWidget(h_sub)
         hh.addLayout(title_box, stretch=1)
 
+        gh_btn = QPushButton("⭐ GitHub 仓库 & 检查更新")
+        gh_btn.setToolTip("点击在浏览器中打开官方 GitHub Releases 下载最新版本")
+        gh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        gh_btn.setFixedHeight(28)
+        gh_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {p['btn_primary']};
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: 600;
+                border-radius: 6px;
+                padding: 0 12px;
+                border: none;
+            }}
+            QPushButton:hover {{
+                background: {p['btn_primary_hover']};
+            }}
+        """)
+        gh_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/CatBoss-Paw/EasyClipboard/releases")))
+        hh.addWidget(gh_btn)
+
         close_top = QPushButton("✕")
         close_top.setFixedSize(26, 26)
         close_top.setStyleSheet(f"""
@@ -2150,12 +2182,21 @@ class HelpDialog(QDialog):
         </head>
         <body>
 
+        <div style="background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;">
+            <b style="color: {sec_title}; font-size: 14px;">🌐 官方开源主页与最新版本下载</b><br/>
+            <div style="margin-top: 5px; font-size: 12px; color: {text_color}; line-height: 1.65;">
+                本软件 100% 离线隐私运行。获取最新功能更新、查看 Release 发行版或提交 Issue 反馈，请访问官方 GitHub：<br/>
+                <a href="https://github.com/CatBoss-Paw/EasyClipboard/releases" style="color: {sec_title}; font-weight: 700; text-decoration: underline;">👉 前往 GitHub Releases 检查并下载最新版本</a>
+                <span style="color: {text_color}; margin-left: 8px;">(https://github.com/CatBoss-Paw/EasyClipboard)</span>
+            </div>
+        </div>
+
         <div class="card">
             <h2>🚀 一、核心架构：双轨分轨与极致轻量</h2>
             <ul>
                 <li><b>左栏（附件与截图）</b>：自动收录复制的本地文件、微信/企微接收文件与系统截图，大文件采用<b>零拷贝</b>引用，绝不重复占用磁盘。</li>
-                <li><b>右栏（文字碎片）</b>：纯文字片段自动归入，自动清洗排版，双击直接复制全文。</li>
-                <li><b>物理内存极致克制</b>：主面板隐藏或折叠为小方块时，操作系统自动回收休眠工作集，常驻物理内存仅 <b>15MB ~ 25MB</b>。</li>
+                <li><b>右栏（文字碎片）</b>：纯文字片段自动归入，智能识别 URL 链接 🔗，双击直接复制全文。</li>
+                <li><b>物理内存极致克制</b>：主面板隐藏或折叠为小方块时，自动触发 Windows 工作集深度修剪，物理内存狂降至 <b>4.16MB</b>，看守进程仅 <b>28MB</b>！</li>
             </ul>
         </div>
 
