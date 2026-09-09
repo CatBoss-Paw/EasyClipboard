@@ -314,12 +314,12 @@ graph TD
 
 ### 方式一：下载预构建绿色版（最推荐，零依赖解压即用）
 
-1. 前往 GitHub [Releases](../../releases) 页面；
-2. 下载最新的 `EasyClipboard-vX.X.X-win64.zip`；
+1. 前往 GitHub [Releases](https://github.com/CatBoss-Paw/EasyClipboard/releases) 页面；
+2. 下载最新的 `EasyClipboard-v1.1.0-windows-x64.zip`；
 3. 解压到您喜欢的目录（例如 `D:\Tools\EasyClipboard\`）；
 4. 双击运行 **`轻松剪贴板.exe`** 即可开启极速办公体验！
 
-> 💡 **绿色纯净**：免安装包、无需系统管理员权限、零注册表写入（除可选的自启动选项外）。如需卸载，直接删除文件夹即可，干干净净。
+> 💡 **绿色纯净**：单一可执行程序、免安装包、无需系统管理员权限、零注册表依赖、零控制台黑框。如需卸载，直接删除文件夹即可，干干净净。
 
 ---
 
@@ -333,7 +333,7 @@ cd EasyClipboard
 # 2. 安装 Python 依赖（推荐 Python 3.10 ~ 3.13）
 pip install -r requirements.txt
 
-# 3. 运行程序（双进程架构，启动界面会自动拉起后台看守）
+# 3. 运行程序（一体化架构，内置后台守护线程）
 python shelf_app.py
 ```
 
@@ -345,8 +345,8 @@ python shelf_app.py
 # 安装打包工具
 pip install pyinstaller
 
-# 使用针对 Windows 双进程与图标优化的专有 spec 文件打包
-pyinstaller --noconfirm EasyClipboard.spec
+# 使用针对 Windows 单一图形程序优化的 spec 文件打包
+pyinstaller --clean -y EasyClipboard.spec
 
 # 构建产物将生成于 dist/EasyClipboard/ 目录
 ```
@@ -358,15 +358,13 @@ pyinstaller --noconfirm EasyClipboard.spec
 ```
 EasyClipboard/
 ├── assets/                    # 高清图标套件（包含 16~256px 多尺度 app.ico 与各尺寸矢量 Logo）
-├── deploy/
-│   └── workflows/             # GitHub Actions 跨平台 CI 自动化构建配置
 ├── tests/                     # 自动化测试用例套件
 ├── EasyClipboard.spec         # 极致裁剪、防杀软误报的 PyInstaller onedir 打包配置
+├── clipboard_watcher.py       # 内置底层 Win32 剪贴板守护与归档线程
 ├── icons.py                   # 纯 QPainter 矢量绘制的高清自适应图标库
 ├── prompts_store.py           # 快速指令本地 Markdown 存储引擎
 ├── requirements.txt           # 核心依赖清单（PyQt6, keyboard）
-├── shelf_app.py               # 界面主程序（Per-Monitor DPI Aware V2, 内存治理, 快照预览）
-├── watchdog.pyw               # 常驻后台看守进程（Win32 剪贴板轮询与日志自动化归档）
+├── shelf_app.py               # 一体化图形主程序（Per-Monitor DPI Aware V2, 内存治理, 快照预览）
 │
 └── 运行时数据目录（自动创建于软件根目录下，便于整包备份与迁移）：
     ├── _TempShelf/            # 临时工作台素材与截图落盘区
