@@ -389,9 +389,21 @@ class ClipboardWatcher(QObject):
             self._save_manifest(entries)
             self.entry_captured.emit(last_added)
 
+    def is_alive(self) -> bool:
+        """检测看护守护线程是否健康存活"""
+        return bool(self._running and self._thread and self._thread.is_alive())
+
+    def _open_clipboard_retry(self, max_retries: int = 6, delay: float = 0.025) -> bool:
+        """针对外部程序正写入剪贴板时的锁冲突进行毫秒级退避重试，彻底根除漏采"""
+        for _ in range(max_retries):
+            if user32.OpenClipboard(None):
+                return True
+            time.sleep(delay)
+        return False
+
     def _worker_loop(self):
         while self._running:
-            time.sleep(0.35)
+            time.sleep(0.25)
             try:
                 self._flush_due_pending()
                 # 防自吞噬：主程序正在执行复制/拖拽操作时，看护器完全静默
@@ -401,32 +413,40 @@ class ClipboardWatcher(QObject):
                 seq = user32.GetClipboardSequenceNumber()
                 if seq == self._last_seq:
                     continue
-                self._last_seq = seq
 
                 if self._paused:
+                    self._last_seq = seq
                     continue
 
-                if user32.OpenClipboard(None):
-                    try:
-                        has_dib = user32.IsClipboardFormatAvailable(CF_DIB)
-                        has_files = user32.IsClipboardFormatAvailable(CF_HDROP)
-                        has_text = user32.IsClipboardFormatAvailable(CF_UNICODETEXT)
+                # 毫秒级防竞态重试：避免外部软件写入过程中的短暂锁冲突导致永久漏采
+                if not self._open_clipboard_retry():
+                    # 被占用打不开时保留 seq，下轮循环继续尝试
+                    continue
 
-                        # 如果是文件复制，优先按文件处理
-                        if has_files:
-                            self._commit_pending_text()
-                            self._capture_files()
-                        # 如果是纯截图（通常只有 DIB 或伴随少量非文字格式）
-                        elif has_dib and not has_text:
-                            self._commit_pending_text()
-                            self._capture_dib()
-                        # 如果有文字（或者是图文混合），优先摄取文本内容
-                        elif has_text:
-                            self._capture_text()
-                        elif has_dib:
-                            self._commit_pending_text()
-                            self._capture_dib()
-                    finally:
-                        user32.CloseClipboard()
-            except Exception:
-                pass
+                try:
+                    has_dib = user32.IsClipboardFormatAvailable(CF_DIB)
+                    has_files = user32.IsClipboardFormatAvailable(CF_HDROP)
+                    has_text = user32.IsClipboardFormatAvailable(CF_UNICODETEXT)
+
+                    # 如果是文件复制，优先按文件处理
+                    if has_files:
+                        self._commit_pending_text()
+                        self._capture_files()
+                    # 如果是纯截图（通常只有 DIB 或伴随少量非文字格式）
+                    elif has_dib and not has_text:
+                        self._commit_pending_text()
+                        self._capture_dib()
+                    # 如果有文字（或者是图文混合），优先摄取文本内容
+                    elif has_text:
+                        self._capture_text()
+                    elif has_dib:
+                        self._commit_pending_text()
+                        self._capture_dib()
+
+                    # 只有在成功读取处理后，才把序列号标记为已消费
+                    self._last_seq = seq
+                finally:
+                    user32.CloseClipboard()
+            except Exception as e:
+                import traceback
+                print(f"[ClipboardWatcher 异常] {e}\n{traceback.format_exc()}", file=sys.stderr)

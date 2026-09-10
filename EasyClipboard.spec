@@ -71,7 +71,7 @@ EXTRA_EXCLUDES = [
     "lxml", "fastapi", "starlette", "uvicorn", "pydub", "pygame",
     "torch", "torchvision", "torchaudio", "sklearn", "pytest", "unittest",
     "nacl", "orjson", "jinja2", "fsspec", "jsonschema", "websockets",
-    "yaml", "yarl", "zstandard", "tzdata", "watchfiles",
+    "yaml", "yarl", "zstandard", "tzdata", "watchfiles", "keyboard",
 ]
 
 _DROP_BIN_KEYWORDS = (
@@ -104,7 +104,7 @@ ui_analysis = Analysis(
     pathex=[],
     binaries=[],
     datas=[('assets', 'assets')],
-    hiddenimports=["keyboard", "prompts_store", "icons", "clipboard_watcher"],
+    hiddenimports=["prompts_store", "icons", "clipboard_watcher"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[*EXTRA_EXCLUDES, *QT_EXCLUDES],

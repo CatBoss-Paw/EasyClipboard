@@ -14,6 +14,7 @@ Smart Staging Shelf — 微信/企微协同桌面临时中转架（PyQt6）
 """
 
 import ctypes
+import ctypes.wintypes
 import gc
 import hashlib
 import json
@@ -22,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +79,59 @@ MANIFEST_NAME = ".manifest.json"
 HOTKEY = "f9"
 __version__ = "1.2.0"
 APP_VERSION = "v1.2.0"
+
+# ------------------------------------------------------------------ Win32 原生全局热键常量
+HOTKEY_ID_F9 = 0xF901
+HOTKEY_ID_F10 = 0xF101
+
+VK_MAP = {
+    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
+    "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+    "space": 0x20, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
+}
+for _i in range(10):
+    VK_MAP[str(_i)] = 0x30 + _i
+for _c in range(ord('a'), ord('z') + 1):
+    VK_MAP[chr(_c)] = 0x41 + (_c - ord('a'))
+
+def parse_hotkey_string(hk_str: str) -> tuple:
+    """将热键字符串解析为 (modifiers, vk_code)"""
+    parts = [p.strip().lower() for p in hk_str.split("+") if p.strip()]
+    mod = 0x4000  # MOD_NOREPEAT: 防止长按连续向消息队列灌消息
+    vk = 0x78     # 默认 F9
+    for p in parts:
+        if p in ("ctrl", "control"):
+            mod |= 0x0002
+        elif p in ("alt", "menu"):
+            mod |= 0x0001
+        elif p in ("shift",):
+            mod |= 0x0004
+        elif p in ("win", "windows"):
+            mod |= 0x0008
+        else:
+            vk = VK_MAP.get(p, 0x78)
+    return mod, vk
+
+# ------------------------------------------------------------------ Win32 64位 API 签名强制声明（杜绝指针截断）
+if sys.platform == "win32":
+    try:
+        _u32 = ctypes.windll.user32
+        _u32.RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+        _u32.RegisterHotKey.restype = ctypes.c_bool
+        _u32.UnregisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _u32.UnregisterHotKey.restype = ctypes.c_bool
+        _u32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        _u32.ShowWindow.restype = ctypes.c_bool
+        _u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        _u32.SetWindowPos.restype = ctypes.c_bool
+        _u32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        _u32.SetForegroundWindow.restype = ctypes.c_bool
+        _u32.BringWindowToTop.argtypes = [ctypes.c_void_p]
+        _u32.BringWindowToTop.restype = ctypes.c_bool
+        _u32.AllowSetForegroundWindow.argtypes = [ctypes.c_int]
+        _u32.AllowSetForegroundWindow.restype = ctypes.c_bool
+    except Exception:
+        pass
 
 # ------------------------------------------------------------------ 内置看护架构
 # 【一体化单进程架构】软件与看护后台完全融为一体（All-in-One）。
@@ -2474,8 +2529,7 @@ class Shelf(QWidget):
         self._load_manifest()
         self._build_ui()
         self._build_tray()
-        self._register_pause_hotkey()
-        self._register_hotkey()
+        self._register_native_hotkeys()
         self._paint_pin_state()
         # 【核心内置看护】初始化并启动内置剪贴板后台看护守护线程
         self.watcher = ClipboardWatcher(
@@ -2487,6 +2541,12 @@ class Shelf(QWidget):
         self.watcher.entry_captured.connect(self._on_item_captured)
         self.watcher.pause_state_changed.connect(self._on_watcher_pause_changed)
         self.watcher.start()
+
+        # 【核心保活看门狗】每 3 秒检测一次看护守护线程状态，若异常中断即刻原地自动拉起
+        self._watcher_watchdog = QTimer(self)
+        self._watcher_watchdog.setInterval(3000)
+        self._watcher_watchdog.timeout.connect(self._check_watcher_alive)
+        self._watcher_watchdog.start()
 
         self._commit()
         self._restore_last_geometry()
@@ -3907,80 +3967,71 @@ class Shelf(QWidget):
             self._toast("已恢复捕获")
 
 
-    def _register_pause_hotkey(self):
-        # 与 F9 相同的钩子线程标志 + GUI 轮询消费模式
-        self._pause_pending = False
+    def _check_watcher_alive(self):
+        """保活心跳：如果看护守护线程中断，自动无缝拉起"""
+        if hasattr(self, "watcher") and self.watcher:
+            if not self.watcher.is_alive():
+                print(f"[{datetime.now()}] [Shelf] 发现看护守护线程中断，正在原地自动重新拉起！", file=sys.stderr)
+                self.watcher.start()
+
+    def _register_native_hotkeys(self):
+        """使用 Windows 操作系统原生 RegisterHotKey 机制，彻底根除第三方 keyboard 库的致命崩溃"""
+        if sys.platform != "win32":
+            return
         try:
-            import keyboard
-            keyboard.add_hotkey("f10", lambda: setattr(self, "_pause_pending", True))
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            # 1. 注册主呼出热键 (默认 F9)
+            hk_str = self.settings.get("hotkey", HOTKEY)
+            mod_f9, vk_f9 = parse_hotkey_string(hk_str)
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_F9)
+            ok_f9 = user32.RegisterHotKey(hwnd, HOTKEY_ID_F9, mod_f9, vk_f9)
+            if not ok_f9:
+                print(f"[Shelf] 原生呼出热键 {hk_str} 注册失败，可能被其他软件占用", file=sys.stderr)
+
+            # 2. 注册暂停捕获热键 (F10)
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_F10)
+            ok_f10 = user32.RegisterHotKey(hwnd, HOTKEY_ID_F10, 0x4000, 0x79)
+            if not ok_f10:
+                print("[Shelf] 原生热键 F10 注册失败", file=sys.stderr)
         except Exception as e:
-            print(f"[Shelf] F10 热键注册失败：{e}", file=sys.stderr)
-            QShortcut(QKeySequence("F10"), self).activated.connect(self.toggle_pause)
+            print(f"[Shelf] 原生热键注册异常：{e}", file=sys.stderr)
 
-        poll2 = QTimer(self)
-        poll2.setInterval(150)
-        poll2.timeout.connect(self._consume_pause_hotkey)
-        poll2.start()
-
-    def _consume_pause_hotkey(self):
-        if getattr(self, "_pause_pending", False):
-            self._pause_pending = False
-            self.toggle_pause()
-
-    def _register_hotkey(self):
-        """按设置注册全局呼出热键（支持重新注册换键）；失败退化为窗口内快捷键"""
-        self._hotkey_pending = False
-        hk = self.settings.get("hotkey", HOTKEY)
+    def _unregister_native_hotkeys(self):
+        """窗口关闭或重建前安全注销热键"""
+        if sys.platform != "win32":
+            return
         try:
-            import keyboard
-            if getattr(self, "_hotkey_handler", None) is not None:
-                try:
-                    keyboard.remove_hotkey(self._hotkey_handler)
-                except (KeyError, ValueError):
-                    pass
-            self._hotkey_handler = keyboard.add_hotkey(
-                hk, lambda: setattr(self, "_hotkey_pending", True))
-            self._hotkey_inapp_only = False
-        except Exception as e:
-            print(f"[Shelf] 全局热键注册失败：{e}", file=sys.stderr)
-            self._hotkey_inapp_only = True
-            QShortcut(QKeySequence(hk.upper()), self).activated.connect(
-                self.toggle_visible)
-
-        if not hasattr(self, "_hotkey_poll_started"):
-            self._hotkey_poll_started = True
-            poll = QTimer(self)
-            poll.setInterval(120)
-            poll.timeout.connect(self._consume_hotkey)
-            poll.start()
-
-    def _consume_hotkey(self):
-        # 钩子自愈看门狗：防止系统长时间休眠唤醒后 Windows 静默卸载 WH_KEYBOARD_LL 钩子
-        now = time.monotonic()
-        if now - getattr(self, "_last_hook_heal", 0) > 25.0:
-            self._last_hook_heal = now
-            self._heal_hotkeys()
-
-        if getattr(self, "_hotkey_pending", False):
-            if self._drag_active:
-                return                    # 拖拽模态循环中挂起 F9，拖完再消费
-            self._hotkey_pending = False
-            self.toggle_visible()
-
-    def _heal_hotkeys(self):
-        """保活全局键盘钩子，免疫 Windows 系统待机休眠导致的静默卸载"""
-        try:
-            import keyboard
-            hk = self.settings.get("hotkey", HOTKEY)
-            if getattr(self, "_hotkey_handler", None) is not None:
-                try:
-                    keyboard.remove_hotkey(self._hotkey_handler)
-                except Exception:
-                    pass
-            self._hotkey_handler = keyboard.add_hotkey(
-                hk, lambda: setattr(self, "_hotkey_pending", True))
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_F9)
+            user32.UnregisterHotKey(hwnd, HOTKEY_ID_F10)
         except Exception:
             pass
+
+    def _register_hotkey(self):
+        """向后兼容接口"""
+        self._register_native_hotkeys()
+
+    def nativeEvent(self, event_type, message):
+        """Windows 消息泵原生钩入：直接从操作系统内核接收 WM_HOTKEY 消息（零多线程竞争、零输入同步死锁）"""
+        if event_type == b"windows_generic_MSG":
+            try:
+                msg_ptr = int(message)
+                if msg_ptr:
+                    uMsg = ctypes.c_uint.from_address(msg_ptr + 8).value
+                    if uMsg == 0x0312:  # WM_HOTKEY
+                        hk_id = ctypes.c_size_t.from_address(msg_ptr + 16).value
+                        if hk_id == HOTKEY_ID_F9:
+                            if not getattr(self, "_drag_active", False):
+                                self.toggle_visible()
+                            return True, 0
+                        elif hk_id == HOTKEY_ID_F10:
+                            self.toggle_pause()
+                            return True, 0
+            except Exception:
+                pass
+        return False, 0
 
     def _is_on_any_screen(self) -> bool:
         """检测当前窗口是否有足够面积落在任一可用屏幕内"""
@@ -5316,6 +5367,7 @@ class Shelf(QWidget):
         self._paint_pin_state()
         self.apply_look()
         self.show()
+        self._register_native_hotkeys()
         self._toast("已钉在原地常驻" if self._pinned
                     else "已取消置顶常驻")
 
@@ -5381,43 +5433,81 @@ class Shelf(QWidget):
 _server = None
 
 
+_LOG_FILE_HANDLE = None
+
+
+class DualStream:
+    """双写输出流：同时将输出保留给控制台（若有）并实时无缓冲刷入磁盘日志文件"""
+    def __init__(self, original_stream, log_file):
+        self.orig = original_stream
+        self.log_file = log_file
+
+    def write(self, s):
+        if self.orig is not None:
+            try:
+                self.orig.write(s)
+            except Exception:
+                pass
+        if self.log_file is not None:
+            try:
+                self.log_file.write(s)
+                self.log_file.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        if self.orig is not None:
+            try:
+                self.orig.flush()
+            except Exception:
+                pass
+        if self.log_file is not None:
+            try:
+                self.log_file.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        if self.orig is not None and hasattr(self.orig, "isatty"):
+            try:
+                return self.orig.isatty()
+            except Exception:
+                pass
+        return False
+
+    def fileno(self):
+        if self.log_file is not None and hasattr(self.log_file, "fileno"):
+            try:
+                return self.log_file.fileno()
+            except Exception:
+                pass
+        if self.orig is not None and hasattr(self.orig, "fileno"):
+            try:
+                return self.orig.fileno()
+            except Exception:
+                pass
+        raise OSError("DualStream has no underlying fileno")
+
+
 def _ensure_stdio() -> None:
-    r"""【P0 / BUG-007】windowed exe 下 sys.stdout/sys.stderr 是 None，必须先接住。
-
-    实测结论（tests/e2e_launchui_ab_test.py，四组对照全部复现）：
-        Failed to execute script 'shelf_app' due to unhandled exception:
-        sys.stderr is None
-
-    PyInstaller 以 console=False 打包时进程没有控制台，CPython 会把
-    sys.stdout / sys.stderr 置为 None。而 main() 里的 faulthandler.enable()
-    在 stderr 为 None 时【直接抛 RuntimeError: sys.stderr is None】（已单独
-    复现验证）。这行异常发生在 QApplication 创建之前，于是界面 exe 100%
-    起不来，用户双击只看到 PyInstaller 的崩溃对话框。
-
-    与启动方式、环境变量均无关：os.startfile / subprocess.Popen、
-    带 PYTHONHOME / 剥离 PYTHONHOME，四组全崩 —— 证明不是环境问题。
-
-    顺带修掉一个连带缺陷：打包版里所有 print(..., file=sys.stderr) 的诊断
-    输出全部静默丢失（print 到 None 是安全的，只是没地方去），现场无从
-    排障。这里把 None 的 stdio 接到日志文件，一举两得。
-
-    只在 stdio 为 None 时才接管：脚本模式与测试模式完全不受影响（零行为变化）。
-    """
-    if sys.stderr is not None and sys.stdout is not None:
-        return
+    """保证无论是否以无控制台模式打包，所有日志与错误均 100% 实时同步写入磁盘 shelf_app.log"""
+    global _LOG_FILE_HANDLE
+    log_path = APP_DIR / "shelf_app.log"
     try:
-        f = open(APP_DIR / "shelf_app.log", "a", buffering=1,
-                 encoding="utf-8", errors="replace")
-    except OSError:
-        # 日志文件都开不了（只读目录等）：退回黑洞，绝不能让启动失败
-        try:
-            f = open(os.devnull, "a", encoding="utf-8")
-        except OSError:
-            return
-    if sys.stderr is None:
-        sys.stderr = f
-    if sys.stdout is None:
-        sys.stdout = f
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            bak = APP_DIR / "shelf_app.log.bak"
+            try:
+                bak.unlink(missing_ok=True)
+                log_path.rename(bak)
+            except Exception:
+                pass
+        f = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+        _LOG_FILE_HANDLE = f
+    except Exception:
+        f = None
+
+    sys.stdout = DualStream(sys.stdout, f)
+    sys.stderr = DualStream(sys.stderr, f)
 
 
 # ------------------------------------------------------------------ 快捷指令区 UI 组件
@@ -5619,10 +5709,14 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
     sock.connectToServer(key)
     if sock.waitForConnected(400):
         # 1. 发送 socket 唤醒请求并等待服务端握手确认
+        got_ack = False
         try:
             sock.write(b"WAKE\n")
             sock.flush()
-            sock.waitForReadyRead(600)
+            if sock.waitForReadyRead(600):
+                resp = sock.readAll().data().decode("utf-8", errors="ignore")
+                if "ACK" in resp:
+                    got_ack = True
             sock.disconnectFromServer()
         except Exception:
             pass
@@ -5638,7 +5732,13 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
                 ctypes.windll.user32.AllowSetForegroundWindow(-1)
             except Exception:
                 pass
-        return False
+        if got_ack:
+            return False
+        # 若 socket 虽连上但未回 ACK，等待看 .wake_sig 是否被老实例消费
+        time.sleep(0.3)
+        if not wake_file.exists():
+            return False
+        print("[Shelf] 警告：已有实例 LocalSocket 无响应且未消费信号，疑似假死，新进程接管为主实例！", file=sys.stderr)
 
     # 若 socket 没连上，做第二道防线探测：写入 .wake_sig 并短暂停顿，看是否有老实例在轮询中将其消费
     try:
@@ -5724,11 +5824,33 @@ def _enable_high_dpi():
                     pass
 
 
+def _global_excepthook(exc_type, exc_value, exc_tb):
+    """全局未捕获异常终极接管，彻底终结静默闪退与无头崩溃"""
+    import traceback
+    err_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    full_msg = f"\n{'='*30} [CRITICAL EXCEPTION {datetime.now():%Y-%m-%d %H:%M:%S}] {'='*30}\n{err_str}{'='*80}\n"
+    print(full_msg, file=sys.stderr)
+    try:
+        with open(APP_DIR / "shelf_crash.log", "a", encoding="utf-8", errors="replace") as cf:
+            cf.write(full_msg)
+    except Exception:
+        pass
+
+
 def main():
     _ensure_stdio()
+    sys.excepthook = _global_excepthook
+    threading.excepthook = lambda args: _global_excepthook(args.exc_type, args.exc_value, args.exc_traceback)
+
     _enable_high_dpi()
     import faulthandler
-    faulthandler.enable()                # 任何原生崩溃都在 stderr 留下完整调用栈
+    try:
+        if _LOG_FILE_HANDLE is not None:
+            faulthandler.enable(file=_LOG_FILE_HANDLE)
+        else:
+            faulthandler.enable()
+    except Exception:
+        pass
     try:
         QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
