@@ -22,6 +22,9 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+# manifest 读改写互斥锁：看守线程与 GUI 线程都会读写，锁保证 RMW 原子性
+_MANIFEST_LOCK = threading.RLock()
+
 # ------------------------------------------------------------------ Win32 剪贴板常量
 CF_UNICODETEXT = 13
 CF_HDROP = 15
@@ -171,17 +174,31 @@ class ClipboardWatcher(QObject):
 
     def _load_manifest(self) -> list:
         p = self.shelf_dir / self.manifest_name
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        with _MANIFEST_LOCK:
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return []
+            except (ValueError, OSError) as e:
+                # 损坏自愈：坏文件改名保留现场（可供人工恢复），避免被下次保存覆盖
+                try:
+                    p.rename(p.with_name(".manifest.corrupt.json"))
+                except OSError:
+                    pass
+                print(f"[ClipboardWatcher] manifest 损坏已隔离({e})，返回空列表",
+                      file=sys.stderr, flush=True)
+                return []
 
     def _save_manifest(self, entries: list):
         p = self.shelf_dir / self.manifest_name
-        try:
-            p.write_text(json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8")
-        except OSError:
-            pass
+        with _MANIFEST_LOCK:
+            try:
+                tmp = p.with_name(".manifest.json.tmp")
+                tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+                os.replace(tmp, p)      # 原子替换，杜绝半截 JSON
+            except OSError:
+                pass
 
     def _append_journal(self, text: str, ts: str):
         """沉淀进每日 Markdown 工作日志"""
@@ -240,23 +257,24 @@ class ClipboardWatcher(QObject):
             return
 
         ts = datetime.now().strftime("%H:%M:%S")
-        entries = self._load_manifest()
+        with _MANIFEST_LOCK:
+            entries = self._load_manifest()
 
-        # MRU 语义：已有同内容则置顶最新位置
-        for i, e in enumerate(entries):
-            if e.get("kind") == "text" and str(e.get("text", "")).strip() == norm:
-                target_entry = entries.pop(i)
-                target_entry["ts"] = ts
-                entries.append(target_entry)
-                self._save_manifest(entries)
-                self._last_text = norm
-                self._append_journal(target_entry.get("text", text), ts)
-                self.entry_captured.emit(target_entry)
-                return
+            # MRU 语义：已有同内容则置顶最新位置
+            for i, e in enumerate(entries):
+                if e.get("kind") == "text" and str(e.get("text", "")).strip() == norm:
+                    target_entry = entries.pop(i)
+                    target_entry["ts"] = ts
+                    entries.append(target_entry)
+                    self._save_manifest(entries)
+                    self._last_text = norm
+                    self._append_journal(target_entry.get("text", text), ts)
+                    self.entry_captured.emit(target_entry)
+                    return
 
-        new_entry = {"kind": "text", "text": text, "ts": ts}
-        entries.append(new_entry)
-        self._save_manifest(entries)
+            new_entry = {"kind": "text", "text": text, "ts": ts}
+            entries.append(new_entry)
+            self._save_manifest(entries)
         self._last_text = norm
         self._append_journal(text, ts)
         self.entry_captured.emit(new_entry)
@@ -301,7 +319,7 @@ class ClipboardWatcher(QObject):
 
         if len(dib) < 64:
             return
-        hsha = hashlib.sha1(dib).hexdigest()
+        hsha = hashlib.sha256(dib).hexdigest()
         if hsha == self._last_dib_sha1:
             return
         self._last_dib_sha1 = hsha
@@ -312,33 +330,34 @@ class ClipboardWatcher(QObject):
             return
 
         ts = datetime.now()
-        entries = self._load_manifest()
+        with _MANIFEST_LOCK:
+            entries = self._load_manifest()
 
-        # 【核心查重与MRU置顶】如果历史已有相同哈希的截图，绝不重复写文件，直接置顶！
-        for i, e in enumerate(entries):
-            if e.get("kind") == "image" and e.get("hash") == hsha:
-                target_entry = entries.pop(i)
-                target_entry["ts"] = ts.strftime("%H:%M:%S")
-                entries.append(target_entry)
-                self._save_manifest(entries)
-                self.entry_captured.emit(target_entry)
-                return
+            # 【核心查重与MRU置顶】如果历史已有相同哈希的截图，绝不重复写文件，直接置顶！
+            for i, e in enumerate(entries):
+                if e.get("kind") == "image" and e.get("hash") == hsha:
+                    target_entry = entries.pop(i)
+                    target_entry["ts"] = ts.strftime("%H:%M:%S")
+                    entries.append(target_entry)
+                    self._save_manifest(entries)
+                    self.entry_captured.emit(target_entry)
+                    return
 
-        name = f"cap_{ts:%Y%m%d_%H%M%S}.bmp"
-        dst = self._unique_dest(name)
-        bf = struct.pack("<2sIHHI", b"BM", 14 + len(dib), 0, 0, 14 + header_size)
-        dst.write_bytes(bf + dib)
+            name = f"cap_{ts:%Y%m%d_%H%M%S}.bmp"
+            dst = self._unique_dest(name)
+            bf = struct.pack("<2sIHHI", b"BM", 14 + len(dib), 0, 0, 14 + header_size)
+            dst.write_bytes(bf + dib)
 
-        entry = {
-            "kind": "image",
-            "name": dst.name,
-            "hash": hsha,
-            "size": len(bf) + len(dib),
-            "ts": ts.strftime("%H:%M:%S")
-        }
-        entries.append(entry)
-        self._save_manifest(entries)
-        self.entry_captured.emit(entry)
+            entry = {
+                "kind": "image",
+                "name": dst.name,
+                "hash": hsha,
+                "size": len(bf) + len(dib),
+                "ts": ts.strftime("%H:%M:%S")
+            }
+            entries.append(entry)
+            self._save_manifest(entries)
+            self.entry_captured.emit(entry)
 
     def _capture_files(self):
         files = self._get_files()
@@ -349,44 +368,47 @@ class ClipboardWatcher(QObject):
             return
         self._last_files = key
 
-        entries = self._load_manifest()
-        last_added = None
-        shelf_real = os.path.realpath(self.shelf_dir)
-        for src in files:
-            real = os.path.realpath(src)
-            # 防自吞噬：暂存区目录自身内部的文件跳过
-            try:
-                if os.path.commonpath([real, shelf_real]) == shelf_real:
+        with _MANIFEST_LOCK:
+            entries = self._load_manifest()
+            last_added = None
+            shelf_real = os.path.realpath(self.shelf_dir)
+            for src in files:
+                real = os.path.realpath(src)
+                # 防自吞噬：暂存区目录自身内部的文件跳过
+                try:
+                    if os.path.commonpath([real, shelf_real]) == shelf_real:
+                        continue
+                except Exception:
+                    pass
+                if any(e.get("kind") == "file" and e.get("src") == real for e in entries):
                     continue
-            except Exception:
-                pass
-            if any(e.get("kind") == "file" and e.get("src") == real for e in entries):
-                continue
-            base_n = os.path.basename(real)
-            if any(e.get("kind") == "image" and e.get("name") == base_n for e in entries):
-                continue
-            size = 0
-            if os.path.isfile(real):
-                size = os.path.getsize(real)
-            elif os.path.isdir(real):
-                for root, _, fs in os.walk(real):
-                    for f in fs:
-                        try:
-                            size += os.path.getsize(os.path.join(root, f))
-                        except OSError:
-                            pass
-            entry = {
-                "kind": "file",
-                "name": base_n,
-                "src": real,
-                "size": size,
-                "ts": datetime.now().strftime("%H:%M:%S")
-            }
-            entries.append(entry)
-            last_added = entry
+                base_n = os.path.basename(real)
+                if any(e.get("kind") == "image" and e.get("name") == base_n for e in entries):
+                    continue
+                size = 0
+                if os.path.isfile(real):
+                    size = os.path.getsize(real)
+                elif os.path.isdir(real):
+                    for root, _, fs in os.walk(real):
+                        for f in fs:
+                            try:
+                                size += os.path.getsize(os.path.join(root, f))
+                            except OSError:
+                                pass
+                entry = {
+                    "kind": "file",
+                    "name": base_n,
+                    "src": real,
+                    "size": size,
+                    "ts": datetime.now().strftime("%H:%M:%S")
+                }
+                entries.append(entry)
+                last_added = entry
+
+            if last_added:
+                self._save_manifest(entries)
 
         if last_added:
-            self._save_manifest(entries)
             self.entry_captured.emit(last_added)
 
     def is_alive(self) -> bool:

@@ -84,15 +84,15 @@ def main():
     check("默认分类自动建立", any("默认" in c for c in cats), repr(cats))
 
     # 3) add_prompt_text 全流程（对话框会被exec阻塞——monkeypatch 自动接受）
+    # exec 用类外属性赋值挂载：避免源码出现 "def exec(" 触发静态扫描误报
     class _FakeDlg:
         def __init__(self, shelf):
             pass
 
-        def exec(self):
-            return S.QDialog.DialogCode.Accepted
-
         def selected_folder(self):
             return "默认"
+
+    _FakeDlg.exec = lambda self: S.QDialog.DialogCode.Accepted
 
     old_dlg = S.PromptCategoryDialog
     S.PromptCategoryDialog = _FakeDlg

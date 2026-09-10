@@ -866,9 +866,9 @@ def extract_preview_text(path: str, ext: str) -> tuple[str, str]:
     if ext == ".docx":
         try:
             import zipfile
-            import xml.etree.ElementTree as ET
+            from defusedxml.ElementTree import fromstring as defused_fromstring
             with zipfile.ZipFile(path) as z:
-                tree = ET.fromstring(z.read("word/document.xml"))
+                tree = defused_fromstring(_safe_office_member(z, "word/document.xml"))
                 paragraphs = []
                 for p in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
                     text = "".join(node.text for node in p.iter() if node.text)
@@ -890,7 +890,7 @@ def extract_preview_text(path: str, ext: str) -> tuple[str, str]:
                 slide_files = sorted([n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")])
                 slides = []
                 for idx, sf in enumerate(slide_files[:30], 1):
-                    tree = ET.fromstring(z.read(sf))
+                    tree = ET.fromstring(_safe_office_member(z, sf))
                     slide_txt = " ".join(node.text for node in tree.iter() if node.text and node.tag.endswith("}t")).strip()
                     if slide_txt:
                         slides.append(f"【第 {idx} 页幻灯片】\n{slide_txt}")
@@ -1214,7 +1214,7 @@ class QuickPreviewPopup(QWidget):
                 v.addLayout(btn_box)
                 self.resize(640, 360)
 
-        # 快捷键与自适应屏幕安全居中
+        # 快捷键与自适应屏幕安全居中（Space/Esc 关闭预览）
         QShortcut(QKeySequence("Space"), self).activated.connect(self.close)
         QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
 
@@ -1605,11 +1605,22 @@ class QuickList(QListWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.shelf._quick_context_menu)
 
+    def _checked_items(self) -> list:
+        """当前勾选的条目（勾选 = 加入批量拖出清单）"""
+        return [self.item(i) for i in range(self.count())
+                if self.item(i).checkState() == Qt.CheckState.Checked]
+
     def startDrag(self, actions):
+        # 勾选优先：勾选了 N 项 = 整包拖出 N 项；无勾选 = 只拖当前按住的条目
         paths = [i.data(Qt.ItemDataRole.UserRole)
-                 for i in self.selectedItems()
-                 if i.data(Qt.ItemDataRole.UserRole) and i.data(Qt.ItemDataRole.UserRole) != "__UP__"]
-        paths = [p for p in paths if os.path.exists(p)]
+                 for i in self._checked_items()
+                 if i.data(Qt.ItemDataRole.UserRole) != "__UP__"]
+        if not paths:
+            paths = [i.data(Qt.ItemDataRole.UserRole)
+                     for i in self.selectedItems()
+                     if i.data(Qt.ItemDataRole.UserRole)
+                     and i.data(Qt.ItemDataRole.UserRole) != "__UP__"]
+        paths = [p for p in paths if p and os.path.exists(p)]
         if not paths:
             return
         mime = QMimeData()
@@ -2295,7 +2306,7 @@ class HelpDialog(QDialog):
         fh.addWidget(ok_btn)
         layout.addWidget(footer)
 
-        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)
+        QShortcut(QKeySequence("Esc"), self).activated.connect(self.close)   # Esc 关闭帮助
 
     def _render_html(self, is_dark: bool, p: dict) -> str:
         bg_card = "#27272a" if is_dark else "#ffffff"
@@ -2738,9 +2749,9 @@ class Shelf(QWidget):
 
         close_btn = QPushButton("✕", objectName="closeBtn")
         close_btn.setProperty("class", "iconBtn")
-        close_btn.setToolTip("关闭窗口（软件在后台继续运行，F9 随时唤回）")
+        close_btn.setToolTip("退出程序（暂存与日志永久保留，下次打开还在）")
         close_btn.setFixedWidth(26)
-        close_btn.clicked.connect(self.hide)
+        close_btn.clicked.connect(self.quit_app)
         h.addWidget(close_btn)
 
         v.addWidget(self.titlebar)
@@ -3191,6 +3202,7 @@ class Shelf(QWidget):
                     item = QListWidgetItem(f"📄  {p}")
                 else:
                     item = QListWidgetItem(f"⚠️  已失效: {p}")
+                self._make_checkable(item)
                 item.setData(Qt.ItemDataRole.UserRole, p)
                 self.quick_list.addItem(item)
 
@@ -3208,8 +3220,26 @@ class Shelf(QWidget):
                 item = QListWidgetItem(f"📁  {n}")
             else:
                 item = QListWidgetItem(f"📄  {n}   ·   {fmt_size(os.path.getsize(p))}")
+            self._make_checkable(item)
             item.setData(Qt.ItemDataRole.UserRole, p)
             self.quick_list.addItem(item)
+
+    @staticmethod
+    def _make_checkable(item: QListWidgetItem):
+        """多选框：勾选 = 加入批量拖出/复制清单（默认不勾选）"""
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Unchecked)
+
+    def quick_checked_paths(self) -> list:
+        """当前勾选的路径（跨目录浏览保留勾选状态）"""
+        out = []
+        for i in range(self.quick_list.count()):
+            it = self.quick_list.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                p = it.data(Qt.ItemDataRole.UserRole)
+                if p and p != "__UP__":
+                    out.append(p)
+        return out
 
     def quick_add_folder(self):
         d = QFileDialog.getExistingDirectory(self, "选择要固定的文件夹")
@@ -4584,7 +4614,9 @@ class Shelf(QWidget):
         """
         try:
             mp = Path(self._entry_path(MANIFEST_NAME))
-            mp.write_text(json.dumps(self.entries, ensure_ascii=False), encoding="utf-8")
+            tmp = mp.with_name(".manifest.json.tmp")
+            tmp.write_text(json.dumps(self.entries, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, mp)              # 原子替换，杜绝半截 JSON
             blocks = []
             for e in self.entries:
                 if not e.get("on", False):
@@ -4595,8 +4627,9 @@ class Shelf(QWidget):
                     blocks.append(f"![]({e['name']})")
                 else:
                     blocks.append(f"附件  {e['name']}（{fmt_size(e.get('size', 0))}）")
-            dp = Path(self._entry_path(DRAFT_NAME))
-            dp.write_text("\n\n".join(blocks), encoding="utf-8")
+            dp_tmp = Path(str(self._entry_path(DRAFT_NAME)) + ".tmp")
+            dp_tmp.write_text("\n\n".join(blocks), encoding="utf-8")
+            os.replace(dp_tmp, self._entry_path(DRAFT_NAME))
         except (OSError, ValueError):
             pass
 
@@ -4646,7 +4679,8 @@ class Shelf(QWidget):
                     try:
                         p_img = self._entry_path(e["name"])
                         if os.path.exists(p_img):
-                            h = hashlib.sha1(Path(p_img).read_bytes()).hexdigest()
+                            # SHA-256：与新增条目的去重哈希保持同一算法口径
+                            h = hashlib.sha256(Path(p_img).read_bytes()).hexdigest()
                             e["hash"] = h
                     except Exception:
                         pass
@@ -5343,12 +5377,18 @@ class Shelf(QWidget):
                 self._restore_last_geometry()
             force_activate_window(self, getattr(self, "_pinned", False))
 
+    def quit_app(self):
+        """退出程序：唯一会移除桌面板装的入口（暂存/日志/源文件全部保留）"""
+        ret = QMessageBox.question(
+            self, "退出轻松剪贴板",
+            "退出后将不再自动收集剪贴板（已保存的素材与日志永久保留）。\n确认退出？")
+        if ret == QMessageBox.StandardButton.Yes:
+            self._save_current_geometry()
+            QApplication.quit()
+
     def toggle_visible(self):
-        if self.isVisible():
-            self.hide()
-            trim_working_set()
-        else:
-            self.show_and_activate()
+        """永远只显示并置前，绝不隐藏——面板是桌面常驻装饰，除非点退出否则不消失"""
+        self.show_and_activate()
 
 
     def toggle_pin(self):
@@ -5710,6 +5750,7 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
     if sock.waitForConnected(400):
         # 1. 发送 socket 唤醒请求并等待服务端握手确认
         got_ack = False
+        old_pid = None
         try:
             sock.write(b"WAKE\n")
             sock.flush()
@@ -5717,6 +5758,10 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
                 resp = sock.readAll().data().decode("utf-8", errors="ignore")
                 if "ACK" in resp:
                     got_ack = True
+                    import re as _re
+                    m = _re.search(r"ACK\s+(\d+)", resp)
+                    if m:
+                        old_pid = int(m.group(1))
             sock.disconnectFromServer()
         except Exception:
             pass
@@ -5733,7 +5778,24 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
             except Exception:
                 pass
         if got_ack:
-            return False
+            # ★ 僵尸校验：老实例收到唤醒并回 ACK，但它的主窗口必须真的
+            #   在桌面上可见。若不可见（GUI 已毁的僵尸态/幽灵隐形态/意外
+            #   隐藏），终结老实例，本进程接管为主实例——保证双击 100% 出窗。
+            time.sleep(0.35)   # 给老实例 show_and_activate 留出执行时间
+            hwnd = user32.FindWindowW(None, WINDOW_TITLE)
+            if hwnd and user32.IsWindowVisible(hwnd):
+                return False    # 老实例已成功显示，让位
+            # 窗口不可见 → 幽灵/僵尸态：终结老实例后本进程接管
+            if old_pid:
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", str(old_pid)],
+                                   capture_output=True, check=False)
+                    print(f"[Shelf] 已终结幽灵实例 PID {old_pid}，本进程接管显示",
+                          file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+            # 老实例是幽灵/僵尸 → 本进程接管为主实例，继续启动并显示窗口
+            return True
         # 若 socket 虽连上但未回 ACK，等待看 .wake_sig 是否被老实例消费
         time.sleep(0.3)
         if not wake_file.exists():
@@ -5778,7 +5840,9 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
                         if "WAKE" in data or "SHOW" in data:
                             on_activate()
                             try:
-                                client.write(b"ACK\n")
+                                # ACK 附带本进程 PID：新实例据此校验老实例
+                                # 是否处于"GUI 已毁但进程残留"的僵尸态并接管
+                                client.write(f"ACK {os.getpid()}\n".encode())
                                 client.flush()
                             except Exception:
                                 pass
@@ -5801,7 +5865,19 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
 
         _server.newConnection.connect(_handle_conn)
 
-    _server.listen(key)
+    if not _server.listen(key):
+        # 并发启动竞速失败：向胜者发 WAKE 后立即退出，杜绝双开
+        try:
+            sock = QLocalSocket()
+            sock.connectToServer(key)
+            if sock.waitForConnected(300):
+                sock.write(b"WAKE\n")
+                sock.flush()
+                sock.waitForBytesWritten(200)
+                sock.disconnectFromServer()
+        except Exception:
+            pass
+        return False
     return True
 
 
