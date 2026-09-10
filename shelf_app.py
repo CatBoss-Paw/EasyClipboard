@@ -178,6 +178,32 @@ def trim_working_set() -> None:
         pass
 
 
+def force_activate_window(widget: QWidget, pinned: bool = False):
+    """穿透 Windows 原生焦点限制，强制将指定 Qt 窗口提升至最前台并激活"""
+    try:
+        widget.show()
+        widget.showNormal()
+        widget.raise_()
+        widget.activateWindow()
+        if sys.platform == "win32":
+            hwnd = int(widget.winId())
+            user32 = ctypes.windll.user32
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_SHOWWINDOW = 0x0040
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW: 彻底唤醒隐藏态窗口
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE: 恢复被最小化状态
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+            if not pinned:
+                user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+    except Exception:
+        pass
+
+
 SHELF_DIR = APP_DIR / "_TempShelf"
 SHELF_REAL = ""
 HISTORY_DIR = APP_DIR / "_History"
@@ -2442,13 +2468,14 @@ class Shelf(QWidget):
 
         # 轮询：manifest 变化 → 刷新；.show_sig → F9 呼出/隐藏；.paused → 状态同步
         self._manifest_mtime = 0
-        # 启动时清掉残留信号，防止旧信号让刚启动的窗口立刻被隐藏
+        # 启动时清掉残留信号，防止旧信号让刚启动的窗口立刻被隐藏或重复唤醒
         try:
             (SHELF_DIR / ".show_sig").unlink(missing_ok=True)
+            (SHELF_DIR / ".wake_sig").unlink(missing_ok=True)
         except OSError:
             pass
         poll = QTimer(self)
-        poll.setInterval(500)
+        poll.setInterval(150)
         poll.timeout.connect(self._poll_backend)
         poll.start()
 
@@ -2501,10 +2528,17 @@ class Shelf(QWidget):
             self._idle_ticks = 0
             self._load_manifest()
             self._sync_ui()
+        wake_sig = SHELF_DIR / ".wake_sig"
+        if wake_sig.exists():
+            try:
+                wake_sig.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.show_and_activate()
         sig = SHELF_DIR / ".show_sig"
         if sig.exists():
             try:
-                sig.unlink()
+                sig.unlink(missing_ok=True)
             except OSError:
                 pass
             self.toggle_visible()
@@ -3794,15 +3828,7 @@ class Shelf(QWidget):
         self._collapsed = False
         if not self._is_on_any_screen():
             self._restore_last_geometry()
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
-        try:
-            hwnd = int(self.winId())
-            ctypes.windll.user32.ShowWindow(hwnd, 9)
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-        except Exception:
-            pass
+        force_activate_window(self, getattr(self, "_pinned", False))
 
     def _build_tray(self):
         try:
@@ -5235,15 +5261,7 @@ class Shelf(QWidget):
         else:
             if not self._is_on_any_screen():
                 self._restore_last_geometry()
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
-            try:
-                hwnd = int(self.winId())
-                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-            except Exception:
-                pass
+            force_activate_window(self, getattr(self, "_pinned", False))
 
     def toggle_visible(self):
         if self.isVisible():
@@ -5559,38 +5577,99 @@ class PromptEditDialog(QDialog):
         self.close()
 
 
-def acquire_single_instance(on_activate=None) -> bool:
-    global _server
+_active_local_clients = []
+
+
+def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.LocalSocket") -> bool:
+    global _server, _active_local_clients
     from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-    key = "SmartStagingShelf.LocalSocket"
+    wake_file = SHELF_DIR / ".wake_sig"
+
+    # 先尝试连接已有的 LocalSocket
     sock = QLocalSocket()
     sock.connectToServer(key)
-    if sock.waitForConnected(300):
-        # 说明已有实例在跑，发送唤醒信号并退出当前新实例
+    if sock.waitForConnected(400):
+        # 1. 发送 socket 唤醒请求并等待服务端握手确认
         try:
-            sock.write(b"SHOW\n")
+            sock.write(b"WAKE\n")
             sock.flush()
-            sock.waitForBytesWritten(300)
+            sock.waitForReadyRead(600)
             sock.disconnectFromServer()
         except Exception:
             pass
+        # 2. 文件信号双保险：写入 .wake_sig 确保老实例 150ms 内必被唤醒
+        try:
+            wake_file.parent.mkdir(parents=True, exist_ok=True)
+            wake_file.write_text(str(time.time()), encoding="utf-8")
+        except Exception:
+            pass
+        # 3. 授权老实例抢占前台焦点
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+            except Exception:
+                pass
         return False
 
+    # 若 socket 没连上，做第二道防线探测：写入 .wake_sig 并短暂停顿，看是否有老实例在轮询中将其消费
+    try:
+        wake_file.parent.mkdir(parents=True, exist_ok=True)
+        wake_file.write_text(str(time.time()), encoding="utf-8")
+        time.sleep(0.26)
+        if not wake_file.exists():
+            # 文件已被老实例消费删除了！证明老实例存在并已唤醒，新实例直接退出
+            if sys.platform == "win32":
+                try:
+                    ctypes.windll.user32.AllowSetForegroundWindow(-1)
+                except Exception:
+                    pass
+            return False
+        # 没有被消费，清理掉此探测文件，当前进程作为唯一主实例继续启动
+        try:
+            wake_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+    # 成为主实例，建立服务监听
     QLocalServer.removeServer(key)
     _server = QLocalServer()
+    _active_local_clients = []
+
     if on_activate:
         def _handle_conn():
             client = _server.nextPendingConnection()
             if client:
+                _active_local_clients.append(client)
+
                 def _on_read():
                     try:
                         data = client.readAll().data().decode("utf-8", errors="ignore")
-                        if "SHOW" in data:
+                        if "WAKE" in data or "SHOW" in data:
                             on_activate()
+                            try:
+                                client.write(b"ACK\n")
+                                client.flush()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
-                    client.disconnectFromServer()
+
+                def _on_disc():
+                    try:
+                        if client.bytesAvailable() > 0:
+                            _on_read()
+                    except Exception:
+                        pass
+                    if client in _active_local_clients:
+                        _active_local_clients.remove(client)
+
                 client.readyRead.connect(_on_read)
+                client.disconnected.connect(_on_disc)
+                if client.bytesAvailable() > 0:
+                    _on_read()
+
         _server.newConnection.connect(_handle_conn)
 
     _server.listen(key)
