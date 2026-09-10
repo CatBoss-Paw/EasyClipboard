@@ -75,6 +75,8 @@ SETTINGS_PATH = APP_DIR / "shelf_settings.json"
 DRAFT_NAME = "draft.md"
 MANIFEST_NAME = ".manifest.json"
 HOTKEY = "f9"
+__version__ = "1.2.0"
+APP_VERSION = "v1.2.0"
 
 # ------------------------------------------------------------------ 内置看护架构
 # 【一体化单进程架构】软件与看护后台完全融为一体（All-in-One）。
@@ -82,7 +84,7 @@ HOTKEY = "f9"
 # 彻底废除外部独立看守进程与黑框终端，开机自启直接常驻托盘，零黑框、零多开。
 from clipboard_watcher import ClipboardWatcher
 
-HELP_TEXT = """轻松剪贴板 (EasyClipboard) · 完整功能与技巧指南
+HELP_TEXT = """轻松剪贴板 (EasyClipboard) v1.2.0 · 完整功能与技巧指南
 
 一、核心架构：双轨分轨与极致轻量
   • 左右分轨：左侧为附件/截图卡片，右侧为纯文字碎片。
@@ -305,6 +307,9 @@ def build_qss(p: dict, glass: bool) -> str:
              border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; }}
 #toastPill {{ color: white; background: {accent};
              border-radius: 10px; padding: 1px 9px; font-size: 10px; font-weight: 600; }}
+#versionTag {{ color: {p['meta']}; background: {p['card']};
+              border: 1px solid {p['border']}; border-radius: 6px;
+              padding: 1px 5px; font-size: 10px; font-weight: 600; }}
 
 .colHeader {{ color: {p.get('col_header', p['meta'])}; font-size: 12px; font-weight: 600; background: transparent; padding: 2px 4px; }}
 #colDivider {{ background: {p['divider']}; width: 1px; max-width: 1px; }}
@@ -1721,6 +1726,9 @@ class SettingsDialog(QDialog):
         # 顶栏
         head = QHBoxLayout()
         head.addWidget(QLabel("⚙ 选项设置", objectName="previewTitle"))
+        v_tag = QLabel(APP_VERSION, objectName="versionTag")
+        v_tag.setToolTip(f"轻松剪贴板 {APP_VERSION}")
+        head.addWidget(v_tag)
         head.addStretch(1)
         close_top = QPushButton("✕", objectName="closeBtn")
         close_top.setProperty("class", "iconBtn")
@@ -2107,7 +2115,7 @@ class HelpDialog(QDialog):
     def __init__(self, shelf):
         super().__init__(shelf)
         self.shelf = shelf
-        self.setWindowTitle("轻松剪贴板 (EasyClipboard) · 完整功能与使用技巧指南")
+        self.setWindowTitle(f"轻松剪贴板 (EasyClipboard) {APP_VERSION} · 完整功能与使用技巧指南")
         self.resize(740, 580)
         self.setMinimumSize(600, 440)
         self.setWindowIcon(make_tray_icon())
@@ -2172,7 +2180,7 @@ class HelpDialog(QDialog):
 
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        h_title = QLabel("轻松剪贴板 (EasyClipboard) · 核心技巧与使用说明")
+        h_title = QLabel(f"轻松剪贴板 (EasyClipboard) {APP_VERSION} · 核心技巧与使用说明")
         h_title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {p['title']};")
         h_sub = QLabel("双轨极速中转 · 永久剪贴记忆 · 快捷指令库 · 极度轻量")
         h_sub.setStyleSheet(f"font-size: 11px; color: {p['meta']};")
@@ -2611,6 +2619,8 @@ class Shelf(QWidget):
         logo.setPixmap(_icon("scissors", "#0A84FF" if PALETTES.get(self.settings.get("theme", "dark")) == PALETTES.get("dark") else "#007AFF", 15).pixmap(15, 15))
         h.addWidget(logo)
         title = QLabel("轻松剪贴板", objectName="title")
+        self.version_lab = QLabel(APP_VERSION, objectName="versionTag")
+        self.version_lab.setToolTip(f"轻松剪贴板 {APP_VERSION} (当前最新发布版本)")
         self.count_lab = QLabel("", objectName="countPill")
         # 顶栏行内提示位（_toast 的载体）。默认隐藏，有消息才显示，
         # TOAST_DURATION_MS 后自动消失。QLabel 不消费鼠标事件（已实测会冒泡），
@@ -2620,6 +2630,7 @@ class Shelf(QWidget):
         self.toast_lab.setTextFormat(Qt.TextFormat.PlainText)
         self.toast_lab.hide()
         h.addWidget(title)
+        h.addWidget(self.version_lab)
         h.addWidget(self.count_lab)
         h.addWidget(self.toast_lab)
         h.addStretch(1)
@@ -3872,7 +3883,7 @@ class Shelf(QWidget):
             self.tray.activated.connect(
                 lambda r: self.toggle_visible()
                 if r == QSystemTrayIcon.ActivationReason.Trigger else None)
-            self.tray.setToolTip("轻松剪贴板 — F9 呼出")
+            self.tray.setToolTip(f"轻松剪贴板 {APP_VERSION} — F9 呼出")
             self.tray.show()
         except Exception:
             self.tray = None
