@@ -63,24 +63,39 @@ QT_EXCLUDES = [
 #                  qoffscreen/qtuiotouchplugin/tls*/networkinformation
 # 保留：qwindows 平台、styles、imageformats 的 qjpeg/qgif/qico
 # （用户可能拖入 jpg/gif/ico 图片）。
-_DROP_BIN_NAMES = {
-    "opengl32sw.dll", "qt6pdf.dll", "libcrypto-3.dll", "libssl-3.dll",
-    "qsvgicon.dll", "qpdf.dll", "qsvg.dll", "qtga.dll", "qtiff.dll",
-    "qwbmp.dll", "qwebp.dll", "qicns.dll", "qminimal.dll", "qoffscreen.dll",
-    "qtuiotouchplugin.dll", "qnetworklistmanager.dll",
-    "qcertonlybackend.dll", "qopensslbackend.dll", "qschannelbackend.dll",
-}
+# 深度排除无关第三方大包（环境误卷入的重型 AI、大模型推理与音视频多媒体库）
+EXTRA_EXCLUDES = [
+    "tkinter", "matplotlib", "numpy", "pandas", "scipy", "PIL",
+    "ctranslate2", "speech_recognition", "av", "onnxruntime", "grpc",
+    "tokenizers", "hf_xet", "cryptography", "pydantic", "pydantic_core",
+    "lxml", "fastapi", "starlette", "uvicorn", "pydub", "pygame",
+    "torch", "torchvision", "torchaudio", "sklearn", "pytest", "unittest",
+    "nacl", "orjson", "jinja2", "fsspec", "jsonschema", "websockets",
+    "yaml", "yarl", "zstandard", "tzdata", "watchfiles",
+]
+
+_DROP_BIN_KEYWORDS = (
+    "ctranslate2", "avcodec", "avformat", "avutil", "swscale", "swresample",
+    "libx264", "libx265", "libvpx", "libsvtav1", "onnxruntime", "cygrpc",
+    "tokenizers", "hf_xet", "cryptography", "pydantic", "lxml", "zstandard",
+    "opengl32sw", "qt6pdf", "libcrypto", "libssl", "qsvg", "qpdf", "qtga",
+    "qtiff", "qwbmp", "qwebp", "qicns", "qminimal", "qoffscreen",
+    "qtuiotouchplugin", "qnetworklistmanager", "qcertonlybackend",
+    "qopensslbackend", "qschannelbackend", "pocketsphinx",
+)
 
 
 def _prune_analysis(analysis):
     analysis.binaries = [
         b for b in analysis.binaries
-        if b[0].replace("\\", "/").rsplit("/", 1)[-1].lower() not in _DROP_BIN_NAMES
+        if not any(k in b[0].replace("\\", "/").rsplit("/", 1)[-1].lower() for k in _DROP_BIN_KEYWORDS)
     ]
     analysis.datas = [
         d for d in analysis.datas
         if "translations" not in d[0].replace("\\", "/").lower()
         and "qt6pdf.dll" not in d[0].replace("\\", "/").lower()
+        and "pocketsphinx" not in d[0].replace("\\", "/").lower()
+        and "tzdata" not in d[0].replace("\\", "/").lower()
     ]
 
 # ------------------------------------------------------------------ 一体化主程序（界面与看护融合）
@@ -92,7 +107,7 @@ ui_analysis = Analysis(
     hiddenimports=["keyboard", "prompts_store", "icons", "clipboard_watcher"],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "scipy", "PIL", *QT_EXCLUDES],
+    excludes=[*EXTRA_EXCLUDES, *QT_EXCLUDES],
     cipher=block_cipher,
     noarchive=False,
 )

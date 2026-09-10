@@ -219,7 +219,7 @@ graph LR
 ### Option 1: Pre-built Release (Recommended)
 
 1. Go to the [Releases](../../releases) page
-2. Download the latest `EasyClipboard-vX.X.X-win64.zip`
+2. Download the latest `EasyClipboard-v1.2.0-windows-x64.zip`
 3. Extract to any directory
 4. Double-click `轻松剪贴板.exe` to run
 
