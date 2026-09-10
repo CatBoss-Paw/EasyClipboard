@@ -315,7 +315,7 @@ graph TD
 ### 方式一：下载预构建绿色版（最推荐，零依赖解压即用）
 
 1. 前往 GitHub [Releases](https://github.com/CatBoss-Paw/EasyClipboard/releases) 页面；
-2. 下载最新的 `EasyClipboard-v1.1.0-windows-x64.zip`；
+2. 下载最新的 `EasyClipboard-v1.2.0-windows-x64.zip`；
 3. 解压到您喜欢的目录（例如 `D:\Tools\EasyClipboard\`）；
 4. 双击运行 **`轻松剪贴板.exe`** 即可开启极速办公体验！
 
