@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyQt6==6.7.1 keyboard pyinstaller
+      - run: pyinstaller --noconfirm EasyClipboard.spec
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist/EasyClipboard/*" -DestinationPath "轻松剪贴板-Windows-便携版.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            轻松剪贴板-Windows-便携版.zip
+            dist/EasyClipboard/轻松剪贴板.exe
+
+  build-macos-arm:
+    runs-on: macos-14        # Apple Silicon (M 系列)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyQt6==6.7.1 keyboard pyinstaller
+      - run: pyinstaller --noconfirm --windowed --name "轻松剪贴板" shelf_app.py
+      - name: Install create-dmg
+        run: brew install create-dmg
+      - name: Build dmg
+        run: |
+          mkdir -p dmgroot
+          cp -R "dist/轻松剪贴板.app" dmgroot/
+          create-dmg --volname "轻松剪贴板" --volicon "dist/轻松剪贴板.app/Contents/Resources/icon-windowed.icns" \
+            --window-size 500 300 --app-drop-link 300 125 \
+            "轻松剪贴板-macOS-AppleSilicon.dmg" dmgroot/ || true
+          [ -f "轻松剪贴板-macOS-AppleSilicon.dmg" ] || hdiutil create -volname "轻松剪贴板" -srcfolder dmgroot -ov -format UDZO "轻松剪贴板-macOS-AppleSilicon.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm
+          path: 轻松剪贴板-macOS-AppleSilicon.dmg
+
+  build-macos-intel:
+    runs-on: macos-13        # Intel 芯片
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyQt6==6.7.1 keyboard pyinstaller
+      - run: pyinstaller --noconfirm --windowed --name "轻松剪贴板" shelf_app.py
+      - name: Build dmg
+        run: |
+          mkdir -p dmgroot
+          cp -R "dist/轻松剪贴板.app" dmgroot/
+          hdiutil create -volname "轻松剪贴板" -srcfolder dmgroot -ov -format UDZO "轻松剪贴板-macOS-Intel.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-intel
+          path: 轻松剪贴板-macOS-Intel.dmg
+
+  release:
+    needs: [build-windows, build-macos-arm, build-macos-intel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
