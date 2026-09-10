@@ -195,6 +195,11 @@ DEFAULT_SETTINGS = {
     "auto_clear_hours": 168,  # 素材保留策略：默认保留 7 天（168 小时）
     "hotkey": "f9",           # 全局呼出热键，设置面板可改
     "autostart": False,       # 开机自启
+    "win_x": None,            # 窗口原地记忆：X 坐标
+    "win_y": None,            # 窗口原地记忆：Y 坐标
+    "win_w": WIN_W,           # 窗口原地记忆：宽度
+    "win_h": WIN_H,           # 窗口原地记忆：高度
+    "pinned": True,           # 窗口常驻置顶偏好
 }
 
 EXT_COLORS = {
@@ -2379,7 +2384,7 @@ class Shelf(QWidget):
         PINNED_DIR.mkdir(parents=True, exist_ok=True)
         self.quick_current_dir = PINNED_DIR.resolve()
 
-        self._pinned = True
+        self._pinned = bool(self.settings.get("pinned", True))
         self._collapsed = False
         self._paused = False            # 暂停捕获开关（F10 / 托盘菜单）
         self._drag_active = False       # OLE 拖拽模态循环进行中（期间挂起重入操作）
@@ -2398,9 +2403,10 @@ class Shelf(QWidget):
                                  bool(self.settings.get("glass")))
 
         self.setWindowTitle("轻松剪贴板")
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint
-                            | Qt.WindowType.WindowStaysOnTopHint
-                            | Qt.WindowType.Tool)
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if self._pinned:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAcceptDrops(True)
         # 【必须开启，否则光标反馈不生效】
@@ -2431,7 +2437,7 @@ class Shelf(QWidget):
         self.watcher.start()
 
         self._commit()
-        self._place_top_right()
+        self._restore_last_geometry()
 
 
         # 轮询：manifest 变化 → 刷新；.show_sig → F9 呼出/隐藏；.paused → 状态同步
@@ -3786,10 +3792,17 @@ class Shelf(QWidget):
             self._mini.close()
             self._mini = None
         self._collapsed = False
-        self._place_top_right()
-        self.show()
+        if not self._is_on_any_screen():
+            self._restore_last_geometry()
+        self.showNormal()
         self.raise_()
         self.activateWindow()
+        try:
+            hwnd = int(self.winId())
+            ctypes.windll.user32.ShowWindow(hwnd, 9)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
 
     def _build_tray(self):
         try:
@@ -3887,14 +3900,82 @@ class Shelf(QWidget):
             poll.start()
 
     def _consume_hotkey(self):
+        # 钩子自愈看门狗：防止系统长时间休眠唤醒后 Windows 静默卸载 WH_KEYBOARD_LL 钩子
+        now = time.monotonic()
+        if now - getattr(self, "_last_hook_heal", 0) > 25.0:
+            self._last_hook_heal = now
+            self._heal_hotkeys()
+
         if getattr(self, "_hotkey_pending", False):
             if self._drag_active:
                 return                    # 拖拽模态循环中挂起 F9，拖完再消费
             self._hotkey_pending = False
             self.toggle_visible()
 
+    def _heal_hotkeys(self):
+        """保活全局键盘钩子，免疫 Windows 系统待机休眠导致的静默卸载"""
+        try:
+            import keyboard
+            hk = self.settings.get("hotkey", HOTKEY)
+            if getattr(self, "_hotkey_handler", None) is not None:
+                try:
+                    keyboard.remove_hotkey(self._hotkey_handler)
+                except Exception:
+                    pass
+            self._hotkey_handler = keyboard.add_hotkey(
+                hk, lambda: setattr(self, "_hotkey_pending", True))
+        except Exception:
+            pass
+
+    def _is_on_any_screen(self) -> bool:
+        """检测当前窗口是否有足够面积落在任一可用屏幕内"""
+        center = self.geometry().center()
+        if QGuiApplication.screenAt(center) is not None:
+            return True
+        for s in QGuiApplication.screens():
+            if s.availableGeometry().intersects(self.geometry()):
+                return True
+        return False
+
+    def _save_current_geometry(self):
+        """记录并持久化窗口位置与大小，实现 100% 原地记忆"""
+        if getattr(self, "_collapsed", False):
+            return
+        p = self.pos()
+        s = self.size()
+        self.settings["win_x"] = p.x()
+        self.settings["win_y"] = p.y()
+        self.settings["win_w"] = s.width()
+        self.settings["win_h"] = s.height()
+        save_settings(self.settings)
+
+    def _restore_last_geometry(self):
+        """将窗口精确恢复至用户设定的原地，杜绝每次唤醒乱跳"""
+        wx = self.settings.get("win_x")
+        wy = self.settings.get("win_y")
+        ww = self.settings.get("win_w", WIN_W)
+        wh = self.settings.get("win_h", WIN_H)
+        try:
+            ww = max(320, int(ww))
+            wh = max(240, int(wh))
+            self.resize(ww, wh)
+        except Exception:
+            pass
+
+        if wx is not None and wy is not None:
+            try:
+                x, y = int(wx), int(wy)
+                self.move(x, y)
+                if self._is_on_any_screen():
+                    return
+            except Exception:
+                pass
+
+        self._place_top_right()
+
     def _place_top_right(self):
-        g = QGuiApplication.primaryScreen().availableGeometry()
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        g = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
         self.move(g.right() - self.width() - 20, g.top() + 20)
 
     # ------------------------------------------------------------ 外观与设置
@@ -4172,6 +4253,8 @@ class Shelf(QWidget):
             elif t == ev.Type.MouseMove and (ev.buttons() & Qt.MouseButton.LeftButton) \
                     and hasattr(self, "_win_offset"):
                 self.move(ev.globalPosition().toPoint() - self._win_offset)
+            elif t == ev.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton:
+                self._save_current_geometry()
         return super().eventFilter(obj, ev)
 
     # ------------------------------------------------------------ 剪贴板管道与每日日志
@@ -4942,6 +5025,7 @@ class Shelf(QWidget):
             if self._scaled_cursor_widget is not None:
                 self._scaled_cursor_widget.unsetCursor()
                 self._scaled_cursor_widget = None
+            self._save_current_geometry()
         super().mouseReleaseEvent(ev)
 
     def start_card_drag(self, entry: dict):
@@ -5145,14 +5229,21 @@ class Shelf(QWidget):
 
     # ------------------------------------------------------------ 窗口管理
     def show_and_activate(self):
-        """外部唤醒/双击桌面快捷方式时调用：展开并置顶显示主窗口"""
+        """外部唤醒/双击桌面快捷方式时调用：在屏幕原地展开并激活主窗口"""
         if getattr(self, "_collapsed", False):
             self._expand_from_block()
         else:
-            self._place_top_right()
-            self.show()
+            if not self._is_on_any_screen():
+                self._restore_last_geometry()
+            self.showNormal()
             self.raise_()
             self.activateWindow()
+            try:
+                hwnd = int(self.winId())
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
 
     def toggle_visible(self):
         if self.isVisible():
@@ -5164,6 +5255,8 @@ class Shelf(QWidget):
 
     def toggle_pin(self):
         self._pinned = not self._pinned
+        self.settings["pinned"] = self._pinned
+        save_settings(self.settings)
         flags = self.windowFlags()
         if self._pinned:
             flags |= Qt.WindowType.WindowStaysOnTopHint
@@ -5176,8 +5269,8 @@ class Shelf(QWidget):
         self._paint_pin_state()
         self.apply_look()
         self.show()
-        self._toast("已置顶——永远浮在所有窗口上方" if self._pinned
-                    else "已取消置顶——窗口可被其他窗口遮挡")
+        self._toast("已钉在原地常驻" if self._pinned
+                    else "已取消置顶常驻")
 
     def _paint_pin_state(self):
         """置顶状态反馈：图标 + 文字（颜色走当前主题，不再硬编码蓝）。"""
