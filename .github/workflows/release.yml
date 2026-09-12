@@ -45,12 +45,12 @@ jobs:
           cp -R "dist/轻松剪贴板.app" dmgroot/
           create-dmg --volname "轻松剪贴板" --volicon "dist/轻松剪贴板.app/Contents/Resources/icon-windowed.icns" \
             --window-size 500 300 --app-drop-link 300 125 \
-            "轻松剪贴板-macOS-AppleSilicon.dmg" dmgroot/ || true
-          [ -f "轻松剪贴板-macOS-AppleSilicon.dmg" ] || hdiutil create -volname "轻松剪贴板" -srcfolder dmgroot -ov -format UDZO "轻松剪贴板-macOS-AppleSilicon.dmg"
+            "轻松剪贴板-macOS-AppleSilicon-实验性.dmg" dmgroot/ || true
+          [ -f "轻松剪贴板-macOS-AppleSilicon-实验性.dmg" ] || hdiutil create -volname "轻松剪贴板" -srcfolder dmgroot -ov -format UDZO "轻松剪贴板-macOS-AppleSilicon-实验性.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm
-          path: 轻松剪贴板-macOS-AppleSilicon.dmg
+          path: 轻松剪贴板-macOS-AppleSilicon-实验性.dmg
 
   build-macos-intel:
     runs-on: macos-13        # Intel 芯片
@@ -65,11 +65,11 @@ jobs:
         run: |
           mkdir -p dmgroot
           cp -R "dist/轻松剪贴板.app" dmgroot/
-          hdiutil create -volname "轻松剪贴板" -srcfolder dmgroot -ov -format UDZO "轻松剪贴板-macOS-Intel.dmg"
+          hdiutil create -volname "轻松剪贴板" -srcfolder dmgroot -ov -format UDZO "轻松剪贴板-macOS-Intel-实验性.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-intel
-          path: 轻松剪贴板-macOS-Intel.dmg
+          path: 轻松剪贴板-macOS-Intel-实验性.dmg
 
   release:
     needs: [build-windows, build-macos-arm, build-macos-intel]
