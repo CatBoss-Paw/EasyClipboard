@@ -60,3 +60,7 @@ check_launch.py
 start_packaged.bat
 start_shelf.bat
 .github/workflows/
+.release_stage/
+video/
+*.ghauth.log
+*.ghrun.log
