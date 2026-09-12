@@ -75,7 +75,7 @@ elif IS_MAC:
     # macOS：经 PyQt6 自带的 Qt Cocoa 桥之外，这里直接用 PyObjC（PyQt6 环境通常已随装；
     # 若缺失则运行时降级为纯文本 pbpaste 后端，保证界面与文字捕获仍可用）
     try:
-        from Foundation import NSPasteboard  # noqa: F401  (PyObjC)
+        from AppKit import NSPasteboard  # noqa: F401  (PyObjC)
         _HAVE_PYOBJC = True
     except ImportError:
         try:
@@ -255,10 +255,19 @@ class ClipboardWatcher(QObject):
             try:
                 pb = self._mac_pb
                 if pb is None:
-                    from Foundation import NSPasteboard
+                    from AppKit import NSPasteboard
                     pb = NSPasteboard.generalPasteboard()
                     self._mac_pb = pb
                 return int(pb.changeCount())
+            except Exception:
+                pass
+            # 无 PyObjC 降级：pbpaste 内容哈希当作变化信号（有文本变化即触发）
+            try:
+                import hashlib as _h
+                import subprocess
+                r = subprocess.run(["pbpaste"], capture_output=True, timeout=2)
+                self._fallback_text = r.stdout.decode("utf-8", errors="ignore")
+                return int.from_bytes(_h.sha256(r.stdout).digest()[:4], "big")
             except Exception:
                 return self._last_seq
         return self._last_seq
@@ -277,7 +286,7 @@ class ClipboardWatcher(QObject):
                 pass
             return out
         try:
-            from Foundation import NSPasteboard
+            from AppKit import NSPasteboard
             from AppKit import NSFilenamesPboardType, NSTIFFPboardType, NSPasteboardTypePNG, NSPasteboardTypeString
             pb = self._mac_pb or NSPasteboard.generalPasteboard()
             self._mac_pb = pb
@@ -642,7 +651,7 @@ class ClipboardWatcher(QObject):
             except Exception:
                 return ""
         try:
-            from Foundation import NSPasteboard
+            from AppKit import NSPasteboard
             from AppKit import NSPasteboardTypeString
             pb = self._mac_pb or NSPasteboard.generalPasteboard()
             self._mac_pb = pb
