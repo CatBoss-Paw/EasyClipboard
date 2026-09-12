@@ -20,47 +20,69 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QBuffer as _QBuffer
+from PyQt6.QtGui import QImage
 
 # manifest 读改写互斥锁：看守线程与 GUI 线程都会读写，锁保证 RMW 原子性
 _MANIFEST_LOCK = threading.RLock()
 
-# ------------------------------------------------------------------ Win32 剪贴板常量
+# ------------------------------------------------------------------ 平台后端（Win32 / macOS NSPasteboard）
+# 设计：平台差异收敛于此。上层 ClipboardWatcher 只依赖后端的
+# sequence()（变化计数）、read()（一次读取全部格式）、open()/close()。
+# Windows 用 Win32 序列号轮询；macOS 用 NSPasteboard changeCount 轮询，
+# 语义一一对应，上层防抖/MRU/日志逻辑完全复用。
+IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform == "win32"
+
 CF_UNICODETEXT = 13
 CF_HDROP = 15
 CF_DIB = 8
 
-# ------------------------------------------------------------------ Win32 API 签名声明
-_c = ctypes
-_u32 = _c.c_uint32
+if IS_WIN:
+    # ------------------------------------------------------------------ Win32 API 签名声明
+    _c = ctypes
+    _u32 = _c.c_uint32
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-shell32 = ctypes.windll.shell32
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    shell32 = ctypes.windll.shell32
 
-# user32
-user32.GetClipboardSequenceNumber.restype = _u32
-user32.GetClipboardSequenceNumber.argtypes = []
-user32.OpenClipboard.restype = _c.c_bool
-user32.OpenClipboard.argtypes = [_c.c_void_p]
-user32.CloseClipboard.restype = _c.c_bool
-user32.CloseClipboard.argtypes = []
-user32.IsClipboardFormatAvailable.restype = _c.c_bool
-user32.IsClipboardFormatAvailable.argtypes = [_u32]
-user32.GetClipboardData.restype = _c.c_void_p
-user32.GetClipboardData.argtypes = [_u32]
+    # user32
+    user32.GetClipboardSequenceNumber.restype = _u32
+    user32.GetClipboardSequenceNumber.argtypes = []
+    user32.OpenClipboard.restype = _c.c_bool
+    user32.OpenClipboard.argtypes = [_c.c_void_p]
+    user32.CloseClipboard.restype = _c.c_bool
+    user32.CloseClipboard.argtypes = []
+    user32.IsClipboardFormatAvailable.restype = _c.c_bool
+    user32.IsClipboardFormatAvailable.argtypes = [_u32]
+    user32.GetClipboardData.restype = _c.c_void_p
+    user32.GetClipboardData.argtypes = [_u32]
 
-# kernel32
-kernel32.GlobalLock.restype = _c.c_void_p
-kernel32.GlobalLock.argtypes = [_c.c_void_p]
-kernel32.GlobalUnlock.restype = _c.c_bool
-kernel32.GlobalUnlock.argtypes = [_c.c_void_p]
-kernel32.GlobalSize.restype = _c.c_size_t
-kernel32.GlobalSize.argtypes = [_c.c_void_p]
+    # kernel32
+    kernel32.GlobalLock.restype = _c.c_void_p
+    kernel32.GlobalLock.argtypes = [_c.c_void_p]
+    kernel32.GlobalUnlock.restype = _c.c_bool
+    kernel32.GlobalUnlock.argtypes = [_c.c_void_p]
+    kernel32.GlobalSize.restype = _c.c_size_t
+    kernel32.GlobalSize.argtypes = [_c.c_void_p]
 
-# shell32
-shell32.DragQueryFileW.restype = _u32
-shell32.DragQueryFileW.argtypes = [_c.c_void_p, _u32, _c.c_wchar_p, _u32]
+    # shell32
+    shell32.DragQueryFileW.restype = _u32
+    shell32.DragQueryFileW.argtypes = [_c.c_void_p, _u32, _c.c_wchar_p, _u32]
+
+elif IS_MAC:
+    # macOS：经 PyQt6 自带的 Qt Cocoa 桥之外，这里直接用 PyObjC（PyQt6 环境通常已随装；
+    # 若缺失则运行时降级为纯文本 pbpaste 后端，保证界面与文字捕获仍可用）
+    try:
+        from Foundation import NSPasteboard  # noqa: F401  (PyObjC)
+        _HAVE_PYOBJC = True
+    except ImportError:
+        try:
+            from AppKit import NSPasteboard  # noqa: F401
+            _HAVE_PYOBJC = True
+        except ImportError:
+            _HAVE_PYOBJC = False
 
 
 class ClipboardWatcher(QObject):
@@ -95,6 +117,8 @@ class ClipboardWatcher(QObject):
         self._last_dib_sha1 = None
         self._last_files = None
         self._suppress_until = 0.0
+        # macOS 后端：NSPasteboard 实例（主线程创建会有限制，在工作线程首次使用时懒创建）
+        self._mac_pb = None
 
         self._ensure_dirs()
 
@@ -138,7 +162,7 @@ class ClipboardWatcher(QObject):
         if self._running:
             return
         self._running = True
-        self._last_seq = user32.GetClipboardSequenceNumber()
+        self._last_seq = self.sequence()
         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="ClipboardWatcher")
         self._thread.start()
 
@@ -223,28 +247,72 @@ class ClipboardWatcher(QObject):
         except OSError:
             pass
 
-    def _get_text(self) -> str:
-        h = user32.GetClipboardData(CF_UNICODETEXT)
-        if not h:
-            return ""
-        ptr = kernel32.GlobalLock(h)
-        if not ptr:
-            return ""
-        try:
-            return ctypes.wstring_at(ptr)
-        finally:
-            kernel32.GlobalUnlock(h)
+    def sequence(self) -> int:
+        """剪贴板变化计数：Windows=GetClipboardSequenceNumber，macOS=changeCount"""
+        if IS_WIN:
+            return int(user32.GetClipboardSequenceNumber())
+        if IS_MAC:
+            try:
+                pb = self._mac_pb
+                if pb is None:
+                    from Foundation import NSPasteboard
+                    pb = NSPasteboard.generalPasteboard()
+                    self._mac_pb = pb
+                return int(pb.changeCount())
+            except Exception:
+                return self._last_seq
+        return self._last_seq
 
-    def _get_files(self) -> list:
-        h = user32.GetClipboardData(CF_HDROP)
-        if not h:
-            return []
-        count = shell32.DragQueryFileW(h, 0xFFFFFFFF, None, 0)
-        out = []
-        buf = ctypes.create_unicode_buffer(2600)
-        for i in range(count):
-            if shell32.DragQueryFileW(h, i, buf, 2600):
-                out.append(buf.value)
+    def _mac_read(self) -> dict:
+        """macOS 一次读取剪贴板全部可用格式，返回与 Win32 分支等价的结构。"""
+        out = {"text": "", "files": [], "dib": None}
+        if not _HAVE_PYOBJC:
+            # 极简降级：仅文本（pbpaste 系统命令，无 PyObjC 依赖）
+            try:
+                import subprocess
+                r = subprocess.run(["pbpaste", "-Prefer", "txt"],
+                                   capture_output=True, timeout=2)
+                out["text"] = r.stdout.decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            return out
+        try:
+            from Foundation import NSPasteboard
+            from AppKit import NSFilenamesPboardType, NSTIFFPboardType, NSPasteboardTypePNG, NSPasteboardTypeString
+            pb = self._mac_pb or NSPasteboard.generalPasteboard()
+            self._mac_pb = pb
+            # 文件引用（Finder 拷贝）
+            files = pb.propertyListForType_(NSFilenamesPboardType)
+            if files:
+                try:
+                    out["files"] = [str(f) for f in files]
+                except TypeError:
+                    pass
+            # 文本
+            if out["files"]:
+                # Finder 复制文件时通常不带纯文本，避免把路径误当文本入库
+                pass
+            else:
+                s = pb.stringForType_(NSPasteboardTypeString)
+                if s:
+                    out["text"] = str(s)
+            # 图片（TIFF 为主，PNG 兜底）
+            tif = pb.dataForType_(NSTIFFPboardType)
+            png = pb.dataForType_(NSPasteboardTypePNG)
+            data = tif or png
+            if data:
+                try:
+                    img = QImage.fromData(bytes(data))
+                    if not img.isNull():
+                        buf = _QBuffer()
+                        buf.open(_QBuffer.OpenModeFlag.WriteOnly)
+                        img.save(buf, "PNG")
+                        out["dib"] = buf.data().data()  # 已是完整 PNG 文件字节
+                        out["dib_is_png"] = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return out
 
     def _commit_pending_text(self):
@@ -304,28 +372,43 @@ class ClipboardWatcher(QObject):
             self._commit_pending_text()
         self._pending_text = {"text": text, "norm": norm, "ts": now}
 
-    def _capture_dib(self):
-        h = user32.GetClipboardData(CF_DIB)
-        if not h:
+    def _capture_image_bytes(self, raw: bytes, is_png: bool = False):
+        """图片统一入口：Windows 传 DIB 裸字节(is_png=False)，macOS 传完整 PNG 文件字节。"""
+        if is_png:
+            hsha = hashlib.sha256(raw).hexdigest()
+            if hsha == self._last_dib_sha1:
+                return
+            self._last_dib_sha1 = hsha
+            ts = datetime.now()
+            with _MANIFEST_LOCK:
+                entries = self._load_manifest()
+                for i, e in enumerate(entries):
+                    if e.get("kind") == "image" and e.get("hash") == hsha:
+                        target_entry = entries.pop(i)
+                        target_entry["ts"] = ts.strftime("%H:%M:%S")
+                        entries.append(target_entry)
+                        self._save_manifest(entries)
+                        self.entry_captured.emit(target_entry)
+                        return
+                name = f"cap_{ts:%Y%m%d_%H%M%S}.png"
+                dst = self._unique_dest(name)
+                dst.write_bytes(raw)
+                entry = {"kind": "image", "name": dst.name, "hash": hsha,
+                         "size": len(raw), "ts": ts.strftime("%H:%M:%S")}
+                entries.append(entry)
+                self._save_manifest(entries)
+                self.entry_captured.emit(entry)
             return
-        size = kernel32.GlobalSize(h)
-        ptr = kernel32.GlobalLock(h)
-        if not ptr or not size:
+        # ---- Windows DIB 原逻辑 ----
+        if len(raw) < 64:
             return
-        try:
-            dib = ctypes.string_at(ptr, size)
-        finally:
-            kernel32.GlobalUnlock(h)
-
-        if len(dib) < 64:
-            return
-        hsha = hashlib.sha256(dib).hexdigest()
+        hsha = hashlib.sha256(raw).hexdigest()
         if hsha == self._last_dib_sha1:
             return
         self._last_dib_sha1 = hsha
 
-        header_size = struct.unpack_from("<I", dib, 0)[0]
-        w, hh = struct.unpack_from("<ii", dib, 4)
+        header_size = struct.unpack_from("<I", raw, 0)[0]
+        w, hh = struct.unpack_from("<ii", raw, 4)
         if w <= 0 or hh == 0:
             return
 
@@ -345,14 +428,14 @@ class ClipboardWatcher(QObject):
 
             name = f"cap_{ts:%Y%m%d_%H%M%S}.bmp"
             dst = self._unique_dest(name)
-            bf = struct.pack("<2sIHHI", b"BM", 14 + len(dib), 0, 0, 14 + header_size)
-            dst.write_bytes(bf + dib)
+            bf = struct.pack("<2sIHHI", b"BM", 14 + len(raw), 0, 0, 14 + header_size)
+            dst.write_bytes(bf + raw)
 
             entry = {
                 "kind": "image",
                 "name": dst.name,
                 "hash": hsha,
-                "size": len(bf) + len(dib),
+                "size": len(bf) + len(raw),
                 "ts": ts.strftime("%H:%M:%S")
             }
             entries.append(entry)
@@ -424,6 +507,9 @@ class ClipboardWatcher(QObject):
         return False
 
     def _worker_loop(self):
+        if IS_MAC:
+            self._worker_loop_mac()
+            return
         while self._running:
             time.sleep(0.25)
             try:
@@ -457,13 +543,29 @@ class ClipboardWatcher(QObject):
                     # 如果是纯截图（通常只有 DIB 或伴随少量非文字格式）
                     elif has_dib and not has_text:
                         self._commit_pending_text()
-                        self._capture_dib()
+                        h = user32.GetClipboardData(CF_DIB)
+                        if h:
+                            size = kernel32.GlobalSize(h)
+                            ptr = kernel32.GlobalLock(h)
+                            if ptr and size:
+                                try:
+                                    self._capture_image_bytes(ctypes.string_at(ptr, size))
+                                finally:
+                                    kernel32.GlobalUnlock(h)
                     # 如果有文字（或者是图文混合），优先摄取文本内容
                     elif has_text:
                         self._capture_text()
                     elif has_dib:
                         self._commit_pending_text()
-                        self._capture_dib()
+                        h = user32.GetClipboardData(CF_DIB)
+                        if h:
+                            size = kernel32.GlobalSize(h)
+                            ptr = kernel32.GlobalLock(h)
+                            if ptr and size:
+                                try:
+                                    self._capture_image_bytes(ctypes.string_at(ptr, size))
+                                finally:
+                                    kernel32.GlobalUnlock(h)
 
                     # 只有在成功读取处理后，才把序列号标记为已消费
                     self._last_seq = seq
@@ -472,3 +574,155 @@ class ClipboardWatcher(QObject):
             except Exception as e:
                 import traceback
                 print(f"[ClipboardWatcher 异常] {e}\n{traceback.format_exc()}", file=sys.stderr)
+
+    def _worker_loop_mac(self):
+        """macOS 轮询：NSPasteboard changeCount 对应 Win32 序列号，
+        一次读取全部格式后按 文件>图片>文本 的优先级分流（与 Windows 一致）。"""
+        while self._running:
+            time.sleep(0.25)
+            try:
+                self._flush_due_pending()
+                if time.time() < self._suppress_until:
+                    continue
+
+                seq = self.sequence()
+                if seq == self._last_seq:
+                    continue
+
+                if self._paused:
+                    self._last_seq = seq
+                    continue
+
+                data = self._mac_read()
+                if data.get("files"):
+                    self._commit_pending_text()
+                    self._capture_files_list(data["files"])
+                elif data.get("dib"):
+                    self._commit_pending_text()
+                    self._capture_image_bytes(data["dib"], is_png=True)
+                elif data.get("text"):
+                    self._capture_text()
+
+                self._last_seq = seq
+            except Exception as e:
+                import traceback
+                print(f"[ClipboardWatcher 异常] {e}\n{traceback.format_exc()}", file=sys.stderr)
+
+    def _capture_text(self):
+        if IS_MAC:
+            text = self._mac_read_cached_text().replace("\x00", "")
+        else:
+            text = self._get_text_win().replace("\x00", "")
+        norm = text.strip()
+        if not norm or len(norm) < self.min_text_len:
+            return
+        if norm == self._last_text:
+            return
+
+        now = time.time()
+        pend = self._pending_text
+        if pend and (norm in pend["norm"] or pend["norm"] in norm):
+            if len(norm) >= len(pend["norm"]):
+                self._pending_text = {"text": text, "norm": norm, "ts": now}
+            else:
+                pend["ts"] = now
+            return
+        if pend:
+            self._commit_pending_text()
+        self._pending_text = {"text": text, "norm": norm, "ts": now}
+
+    def _mac_read_cached_text(self) -> str:
+        """macOS 文本读取（与 _mac_read 相同通道，单取文本）。"""
+        if not _HAVE_PYOBJC:
+            try:
+                import subprocess
+                r = subprocess.run(["pbpaste", "-Prefer", "txt"],
+                                   capture_output=True, timeout=2)
+                return r.stdout.decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        try:
+            from Foundation import NSPasteboard
+            from AppKit import NSPasteboardTypeString
+            pb = self._mac_pb or NSPasteboard.generalPasteboard()
+            self._mac_pb = pb
+            s = pb.stringForType_(NSPasteboardTypeString)
+            return str(s) if s else ""
+        except Exception:
+            return ""
+
+    def _get_text_win(self) -> str:
+        h = user32.GetClipboardData(CF_UNICODETEXT)
+        if not h:
+            return ""
+        ptr = kernel32.GlobalLock(h)
+        if not ptr:
+            return ""
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(h)
+
+    def _capture_files_list(self, files: list):
+        """文件捕获主体（Windows 与 macOS 共用；Win 分支由 _capture_files 调用）。"""
+        if not files:
+            return
+        key = tuple(sorted(os.path.realpath(f) for f in files))
+        if key == self._last_files:
+            return
+        self._last_files = key
+
+        with _MANIFEST_LOCK:
+            entries = self._load_manifest()
+            last_added = None
+            shelf_real = os.path.realpath(self.shelf_dir)
+            for src in files:
+                real = os.path.realpath(src)
+                # 防自吞噬：暂存区目录自身内部的文件跳过
+                try:
+                    if os.path.commonpath([real, shelf_real]) == shelf_real:
+                        continue
+                except Exception:
+                    pass
+                if any(e.get("kind") == "file" and e.get("src") == real for e in entries):
+                    continue
+                base_n = os.path.basename(real)
+                if any(e.get("kind") == "image" and e.get("name") == base_n for e in entries):
+                    continue
+                size = 0
+                if os.path.isfile(real):
+                    size = os.path.getsize(real)
+                elif os.path.isdir(real):
+                    for root, _, fs in os.walk(real):
+                        for f in fs:
+                            try:
+                                size += os.path.getsize(os.path.join(root, f))
+                            except OSError:
+                                pass
+                entry = {
+                    "kind": "file",
+                    "name": base_n,
+                    "src": real,
+                    "size": size,
+                    "ts": datetime.now().strftime("%H:%M:%S")
+                }
+                entries.append(entry)
+                last_added = entry
+
+            if last_added:
+                self._save_manifest(entries)
+
+        if last_added:
+            self.entry_captured.emit(last_added)
+
+    def _capture_files(self):
+        h = user32.GetClipboardData(CF_HDROP)
+        if not h:
+            return
+        count = shell32.DragQueryFileW(h, 0xFFFFFFFF, None, 0)
+        out = []
+        buf = ctypes.create_unicode_buffer(2600)
+        for i in range(count):
+            if shell32.DragQueryFileW(h, i, buf, 2600):
+                out.append(buf.value)
+        self._capture_files_list(out)
