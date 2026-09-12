@@ -77,8 +77,8 @@ SETTINGS_PATH = APP_DIR / "shelf_settings.json"
 DRAFT_NAME = "draft.md"
 MANIFEST_NAME = ".manifest.json"
 HOTKEY = "f9"
-__version__ = "1.2.0"
-APP_VERSION = "v1.2.0"
+__version__ = "1.3.0"
+APP_VERSION = "v1.3.0"
 
 # ------------------------------------------------------------------ Win32 原生全局热键常量
 HOTKEY_ID_F9 = 0xF901
@@ -139,7 +139,7 @@ if sys.platform == "win32":
 # 彻底废除外部独立看守进程与黑框终端，开机自启直接常驻托盘，零黑框、零多开。
 from clipboard_watcher import ClipboardWatcher
 
-HELP_TEXT = """轻松剪贴板 (EasyClipboard) v1.2.0 · 完整功能与技巧指南
+HELP_TEXT = """轻松剪贴板 (EasyClipboard) v1.3.0 · 完整功能与技巧指南
 
 一、核心架构：双轨分轨与极致轻量
   • 左右分轨：左侧为附件/截图卡片，右侧为纯文字碎片。
@@ -1119,8 +1119,23 @@ class QuickPreviewPopup(QWidget):
             self.resize(640, 360)
 
         else:
-            # 具体文件：尝试智能提取内容（Word / Excel / PPT / PDF / 文本代码）
             ext = os.path.splitext(self.entry["name"])[1].lower()
+
+            # 图片文件：直接大图预览（与截图同权的视觉体验）
+            if ext in IMG_EXTS and src and os.path.exists(src):
+                pm = QPixmap(src)
+                if not pm.isNull():
+                    lab = QLabel()
+                    lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    scaled = pm.scaled(800, 560, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                    lab.setPixmap(scaled)
+                    v.addWidget(lab, stretch=1)
+                    meta = QLabel(f"💡 {self.entry['name']} · 原图 {pm.width()}×{pm.height()} · {fmt_size(self.entry.get('size', 0))}",
+                                  objectName="cardMeta")
+                    v.addWidget(meta)
+                    return
+
             preview_content, summary = extract_preview_text(src, ext)
 
             if preview_content:
@@ -3901,7 +3916,13 @@ class Shelf(QWidget):
         act_new_folder = pinned_menu.addAction("➕ 新建分类文件夹并存入…")
 
         menu.addSeparator()
-        a_del = menu.addAction("删除")
+        # 多选感知：右键的卡处于勾选状态且勾选数 >1 时，删除作用于全部勾选项
+        checked_now = [x for x in self.entries if x.get("on", False)]
+        multi_del = len(checked_now) > 1 and e in checked_now
+        if multi_del:
+            a_del = menu.addAction(f"🗑 删除勾选的 {len(checked_now)} 项")
+        else:
+            a_del = menu.addAction("删除")
         chosen = menu.exec(card.mapToGlobal(pos))
         if chosen == a_prompt:
             self.add_prompt_text(e.get("text", ""))
@@ -3914,8 +3935,12 @@ class Shelf(QWidget):
             if new_f:
                 self.ingest_entry_to_pinned(e, subfolder=new_f)
         elif chosen == a_del:
-            self.delete_entry(e)
-            self._toast("已移除这条")
+            if multi_del:
+                self.delete_entries(checked_now)
+                self._toast(f"已移除勾选的 {len(checked_now)} 项")
+            else:
+                self.delete_entry(e)
+                self._toast("已移除这条")
 
     def toggle_collapse(self):
         """折叠：主窗隐藏，右上角原地出现圆润小方块；点方块展开原窗"""
@@ -4887,8 +4912,13 @@ class Shelf(QWidget):
         else:
             src = entry.get("src", "")
             if src and os.path.exists(src):
+                # 图片文件：以图片形式进剪贴板（微信粘贴直接出图）
+                if os.path.splitext(src)[1].lower() in IMG_EXTS:
+                    pm = QPixmap(src)
+                    if not pm.isNull():
+                        mime.setImageData(pm.toImage())
                 mime.setUrls([QUrl.fromLocalFile(src)])
-                mime.setText(src)
+                self._write_own_clipboard(mime, self._suppress_signature([src], ""))
                 self._write_own_clipboard(mime, self._suppress_signature([src], src))
 
     def copy_merged_text(self):
@@ -4907,15 +4937,21 @@ class Shelf(QWidget):
         QTimer.singleShot(1600, lambda: self.btn_copy_text.setText(orig_text))
 
     def delete_entry(self, entry: dict):
-        if entry["kind"] == "image":
-            try:
-                p = self._entry_path(entry["name"])
-                if os.path.exists(p):
-                    os.remove(p)
-            except OSError:
-                pass
-        if entry in self.entries:
-            self.entries.remove(entry)
+        self.delete_entries([entry])
+
+    def delete_entries(self, entries: list):
+        """批量移除：图片实体文件一并清理（仅应用自产文件），引用式条目只摘引用；
+        全部移除后只做一次落盘+刷 UI（逐条 _commit 会造成 N 次全量重渲染）。"""
+        for entry in entries:
+            if entry["kind"] == "image":
+                try:
+                    p = self._entry_path(entry["name"])
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            if entry in self.entries:
+                self.entries.remove(entry)
         self._commit()
 
     def open_entry(self, entry: dict):
@@ -5552,14 +5588,17 @@ def _ensure_stdio() -> None:
 
 # ------------------------------------------------------------------ 快捷指令区 UI 组件
 class PromptDocCard(QFrame):
-    """快捷指令页文档卡：双击=直接复制文档全文；右键=改名/编辑内容/置顶/删除。"""
+    """快捷指令页文档卡：双击=直接复制文档全文；按住拖出=把全文拖进任意输入框；右键=改名/编辑内容/置顶/删除。"""
 
     def __init__(self, shelf, folder: str, info: dict):
         super().__init__(objectName="card")
         self.shelf, self.folder, self.info = shelf, folder, info
         self.setFixedHeight(50)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("双击直接复制文档内文本 · 右键更多操作")
+        self.setToolTip("双击复制全文 · 按住拖出可直接拖进对话框 · 右键更多操作")
+        self._drag_start_pos = None
+        self._last_press = None          # (monotonic秒, 逻辑坐标) 用于自判定双击
+        self._dbl_triggered = False
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: shelf._prompt_doc_ctx(self, pos))
@@ -5591,6 +5630,7 @@ class PromptDocCard(QFrame):
         col.addLayout(nm_h)
         meta = f"{info['preview']} · {info['chars']}字" if info["preview"] \
             else f"{info['chars']}字"
+        meta += " · 双击复制 · 可拖出"
         meta_lab = elided_label(meta, 380, "cardMeta")
         meta_lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         col.addWidget(meta_lab)
@@ -5607,12 +5647,63 @@ class PromptDocCard(QFrame):
         copy_btn.clicked.connect(lambda: self.shelf._prompt_copy(self.folder, self.info["name"]))
         h.addWidget(copy_btn)
 
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = ev.position().toPoint()
+            # 程序内双击自判定（路径 A），与首页 ShelfCard 同一套防抖：
+            # 手抖超过系统双击阈值时 Qt 判不出双击，只能自己比对上一次按压
+            self._maybe_double_click(ev.position().toPoint())
+        super().mousePressEvent(ev)
+
     def mouseDoubleClickEvent(self, ev):
+        # 路径 B：Qt 已判定为双击时走这里（此时收不到第二次 press）
         if ev is not None and ev.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = None
+            self._last_press = None
+            self._dbl_triggered = True
             self.shelf._prompt_copy(self.folder, self.info["name"])
             ev.accept()
             return
         super().mouseDoubleClickEvent(ev)
+
+    def _maybe_double_click(self, pos):
+        now = time.monotonic()
+        last = self._last_press
+        if last is not None:
+            dt = now - last[0]
+            dist = (pos - last[1]).manhattanLength()
+            if dt <= CARD_DBLCLICK_INTERVAL and dist <= CARD_DBLCLICK_MAX_DIST:
+                self._last_press = None
+                self._drag_start_pos = None
+                self._dbl_triggered = True
+                self.shelf._prompt_copy(self.folder, self.info["name"])
+                return
+        self._last_press = (now, pos)
+
+    def mouseMoveEvent(self, ev):
+        if self._drag_start_pos is not None and (ev.buttons() & Qt.MouseButton.LeftButton):
+            dist = (ev.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= CARD_DRAG_THRESHOLD:
+                self._drag_start_pos = None
+                self._start_text_drag()
+                return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self._drag_start_pos = None
+        self._dbl_triggered = False
+        super().mouseReleaseEvent(ev)
+
+    def _start_text_drag(self):
+        """按住拖出：把文档全文作为纯文本拖进任意对话框（复用首页统一拖拽入口）。"""
+        try:
+            text = self.shelf.prompts.read_doc(self.folder, self.info["name"])
+        except Exception:
+            text = ""
+        if not str(text or "").strip():
+            self.shelf._toast("文档内容为空，无法拖出")
+            return
+        self.shelf.start_card_drag({"kind": "text", "text": text})
 
 
 class PromptCategoryDialog(QDialog):
@@ -5782,8 +5873,9 @@ def acquire_single_instance(on_activate=None, key: str = "SmartStagingShelf.Loca
             #   在桌面上可见。若不可见（GUI 已毁的僵尸态/幽灵隐形态/意外
             #   隐藏），终结老实例，本进程接管为主实例——保证双击 100% 出窗。
             time.sleep(0.35)   # 给老实例 show_and_activate 留出执行时间
-            hwnd = user32.FindWindowW(None, WINDOW_TITLE)
-            if hwnd and user32.IsWindowVisible(hwnd):
+            _u = ctypes.windll.user32
+            hwnd = _u.FindWindowW(None, "轻松剪贴板")
+            if hwnd and _u.IsWindowVisible(hwnd):
                 return False    # 老实例已成功显示，让位
             # 窗口不可见 → 幽灵/僵尸态：终结老实例后本进程接管
             if old_pid:
