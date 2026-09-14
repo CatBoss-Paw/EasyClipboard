@@ -418,6 +418,20 @@ EasyClipboard/
 
 ---
 
+## ❓ 常见问题（FAQ）
+
+**Q：杀毒软件（Windows Defender / 管家类）报毒或把 `轻松剪贴板.exe` 删了怎么办？**
+
+本程序使用 PyInstaller 打包，个别杀软会对「无人签名的打包程序 + 开机自启行为」误报（本机实测 Defender 曾因自启动注册表行为误隔离）。本软件开源，全部源码可审计，请放心：
+
+1. 将安装目录加入杀软白名单/排除项：
+   - **Windows Defender**：Windows 安全中心 → 病毒和威胁防护 → 管理设置 → 排除项 → 添加文件夹 → 选择 `D:\Tools\EasyClipboard`；
+   - 或管理员 PowerShell 执行：`Add-MpPreference -ExclusionPath "D:\Tools\EasyClipboard"`；
+2. 若 exe 已被隔离：在「保护历史记录」中还原，或直接从 Release 重新下载解压；
+3. 如不使用「开机自启」功能，也可在应用设置中关闭该选项，可显著降低误报概率。
+
+---
+
 ## 📄 开源协议
 
 本项目基于 [MIT License](./LICENSE) 协议开源，允许自由使用、商用与二次修改。
